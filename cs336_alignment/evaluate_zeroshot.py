@@ -89,13 +89,14 @@ def main():
     
     # Initialize vLLM
     print(f"Loading model {args.model_path}...")
-    try:
-        # Load vllm Model
-        model = LLM(model=args.model_path, trust_remote_code=True, tensor_parallel_size=1)
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        return
-        
+    # Load vllm Model
+    model = LLM(
+        model=args.model_path, 
+        trust_remote_code=True, 
+        tensor_parallel_size=1,
+        max_num_seqs=64, # Adjust this to tune concurrency
+        max_model_len=4096 # Adjust based on needed context window
+    )    
     sampling_params = SamplingParams(
         temperature=0.0,
         max_tokens=2048,
