@@ -83,7 +83,8 @@ def run_compute_group_normalized_rewards(
 
 def run_compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     """Get the entropy of the logits (i.e., entropy of the final dimension)."""
-    raise NotImplementedError
+    from cs336_alignment.compute_entropy import compute_entropy
+    return compute_entropy(logits)
 
 
 def run_get_response_log_probs(
@@ -115,7 +116,13 @@ def run_get_response_log_probs(
                 we have not masked out the token indices corresponding to the prompt
                 or padding; that is done in the train loop.
     """
-    raise NotImplementedError
+    from cs336_alignment.get_response_log_probs import get_response_log_probs
+    return get_response_log_probs(
+        model=model,
+        input_ids=input_ids,
+        labels=labels,
+        return_token_entropy=return_token_entropy
+    )
 
 
 def run_compute_naive_policy_gradient_loss(
