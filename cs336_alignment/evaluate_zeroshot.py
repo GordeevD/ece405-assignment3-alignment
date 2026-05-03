@@ -81,7 +81,7 @@ def main():
     df = pd.read_parquet("hf://datasets/qwedsacf/competition_math/data/train-00000-of-00001-7320a6f3aba8ebd2.parquet")
     
     # 2) format them as string prompts using the r1_zero prompt
-    with open("cs336_alignment/prompts/r1_zero.prompt", "r") as f:
+    with open("../cs336_alignment/prompts/r1_zero.prompt", "r") as f:
         prompt_template = f.read()
     
     prompts = [prompt_template.replace("{question}", problem) for problem in df["problem"]]
