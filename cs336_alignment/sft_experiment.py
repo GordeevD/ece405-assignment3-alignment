@@ -60,6 +60,14 @@ def _next_terminal_step_tqdm_safe(counter: list[int], msg: str, *, use_tqdm_writ
         _emit(line)
 
 
+def _write_final_result(path: Path, payload: dict[str, Any]) -> None:
+    """Append one JSON result row for this run."""
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+
 def init_vllm(
     model_id: str,
     device: str,
@@ -553,8 +561,12 @@ def train(args: argparse.Namespace) -> None:
 
     _next_terminal_step(step_log, "all training epochs complete")
     final_acc = float("nan")
+    final_n_eval: int | None = None
+    final_n_correct: int | None = None
     if llm is not None:
         final_acc = run_eval("final")
+        final_n_eval = len(eval_problems)
+        final_n_correct = int(round(final_acc * final_n_eval))
     else:
         _next_terminal_step(step_log, "skipping final eval (no vLLM)")
 
@@ -578,6 +590,28 @@ def train(args: argparse.Namespace) -> None:
     url = getattr(wandb_run, "url", None)
     if url:
         _emit(f"  W&B URL: {url}")
+    final_result = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "wandb_project": args.wandb_project,
+        "wandb_run_name": args.wandb_run_name,
+        "wandb_url": url,
+        "model_path": args.model_path,
+        "sft_json": str(Path(args.sft_json).expanduser().resolve()),
+        "val_json": str(Path(args.val_json).expanduser().resolve()),
+        "epochs": args.epochs,
+        "learning_rate": args.learning_rate,
+        "train_microbatch_size": args.train_microbatch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "train_steps": train_step,
+        "n_train_examples": len(train_ds),
+        "skip_vllm_eval": args.skip_vllm_eval,
+        "final_eval_accuracy": None if final_acc != final_acc else final_acc,
+        "final_eval_n": final_n_eval,
+        "final_eval_n_correct": final_n_correct,
+    }
+    results_path = Path(args.results_file)
+    _write_final_result(results_path, final_result)
+    _next_terminal_step(step_log, f"wrote final result to {results_path.expanduser().resolve()}")
     _next_terminal_step(step_log, "closing Weights & Biases run")
     wandb_run.finish()
 
@@ -645,6 +679,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Optional HF cache directory (sets HF_HOME when loading models from the Hub).",
+    )
+    p.add_argument(
+        "--results_file",
+        type=str,
+        default="sft_final_results.jsonl",
+        help="Path to append final run result JSONL (default: ./sft_final_results.jsonl).",
     )
     return p
 
