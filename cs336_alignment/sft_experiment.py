@@ -192,20 +192,48 @@ def evaluate_math_vllm(
 
 
 def _wandb_init(args: argparse.Namespace, extra_config: dict[str, Any]) -> Any:
+    """Start a W&B run and bind custom x-axes (explicit metric names; globs are unreliable)."""
     import wandb
 
     cfg = {**vars(args), **extra_config}
-    wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=cfg)
+    entity = args.wandb_entity or os.environ.get("WANDB_ENTITY")
+    init_kw: dict[str, Any] = {
+        "project": args.wandb_project,
+        "name": args.wandb_run_name,
+        "config": cfg,
+    }
+    if entity:
+        init_kw["entity"] = entity
+
+    run = wandb.init(**init_kw)
+    if run is None:
+        raise RuntimeError("wandb.init() returned None (check WANDB credentials / project access).")
+
+    # Custom x-axes: register step counters, then bind each series (see W&B "Customize log axes").
     wandb.define_metric("train_step")
+    for name in (
+        "train/loss",
+        "train/masked_neg_log_prob_sum",
+        "train/response_token_count",
+        "train/epoch",
+    ):
+        wandb.define_metric(name, step_metric="train_step")
+
     wandb.define_metric("eval_step")
-    wandb.define_metric("train/*", step_metric="train_step")
-    wandb.define_metric("eval/*", step_metric="eval_step")
-    url = getattr(wandb.run, "url", None) if wandb.run is not None else None
+    for name in ("eval/accuracy", "eval/n", "eval/n_correct"):
+        wandb.define_metric(name, step_metric="eval_step")
+
+    mode = os.environ.get("WANDB_MODE", "online")
+    _emit(f"Weights & Biases mode: {mode}")
+    url = getattr(run, "url", None)
     if url:
-        _emit(f"Weights & Biases run: {url}")
+        _emit(f"Weights & Biases run URL: {url}")
+    elif mode == "offline":
+        _emit("Weights & Biases: offline run (sync later with `wandb sync` on the run directory).")
     else:
-        _emit("Weights & Biases: run started (offline or URL not available).")
-    return wandb
+        _emit("Weights & Biases: run started (no public URL yet).")
+
+    return run
 
 
 def train(args: argparse.Namespace) -> None:
@@ -268,7 +296,7 @@ def train(args: argparse.Namespace) -> None:
     train_ds = SFTStringDataset(prompts, responses)
     eval_problems, eval_ground_truths = load_val_eval_pairs(Path(args.val_json).expanduser().resolve())
 
-    wb = _wandb_init(
+    wandb_run = _wandb_init(
         args,
         {
             "n_train_examples": len(train_ds),
@@ -324,13 +352,14 @@ def train(args: argparse.Namespace) -> None:
             f"[eval:{tag}] step={eval_step}  accuracy={acc:.6f} ({n_ok}/{n_ev} correct)  "
             f"({100.0 * acc:.2f}%)"
         )
-        wb.log(
+        wandb_run.log(
             {
                 "eval_step": eval_step,
                 "eval/accuracy": acc,
                 "eval/n": metrics["n"],
                 "eval/n_correct": float(n_ok),
-            }
+            },
+            commit=True,
         )
         eval_step += 1
         model.train()
@@ -353,6 +382,9 @@ def train(args: argparse.Namespace) -> None:
             disable=args.no_progress_bar,
             dynamic_ncols=True,
         )
+        last_loss_v: float | None = None
+        last_msum: float | None = None
+        last_rtok: float | None = None
         for batch in pbar:
             tok_batch = tokenize_prompt_and_output(
                 batch["prompt"],
@@ -372,23 +404,27 @@ def train(args: argparse.Namespace) -> None:
                 gradient_accumulation_steps=args.gradient_accumulation_steps,
                 normalize_constant=1.0,
             )
+            last_loss_v = float(loss.item())
+            last_msum = float(meta["masked_neg_log_prob_sum"].item())
+            last_rtok = float(meta["response_token_count"].item())
             accum += 1
             if accum % args.gradient_accumulation_steps == 0:
                 nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 opt.step()
                 opt.zero_grad(set_to_none=True)
                 train_step += 1
-                loss_v = float(loss.item())
-                msum = float(meta["masked_neg_log_prob_sum"].item())
-                rtok = float(meta["response_token_count"].item())
-                wb.log(
+                loss_v = last_loss_v
+                msum = last_msum
+                rtok = last_rtok
+                wandb_run.log(
                     {
                         "train_step": train_step,
                         "train/loss": loss_v,
                         "train/masked_neg_log_prob_sum": msum,
                         "train/response_token_count": rtok,
-                        "train/epoch": epoch,
-                    }
+                        "train/epoch": float(epoch),
+                    },
+                    commit=True,
                 )
                 pbar.set_postfix(
                     opt_step=train_step,
@@ -403,6 +439,17 @@ def train(args: argparse.Namespace) -> None:
             opt.step()
             opt.zero_grad(set_to_none=True)
             train_step += 1
+            if last_loss_v is not None:
+                wandb_run.log(
+                    {
+                        "train_step": train_step,
+                        "train/loss": last_loss_v,
+                        "train/masked_neg_log_prob_sum": last_msum,
+                        "train/response_token_count": last_rtok,
+                        "train/epoch": float(epoch),
+                    },
+                    commit=True,
+                )
             if not args.no_progress_bar:
                 pbar.set_postfix(opt_step=train_step, loss="tail", rtok="—")
             if llm is not None and train_step % args.eval_every_train_steps == 0:
@@ -425,14 +472,10 @@ def train(args: argparse.Namespace) -> None:
     else:
         _emit("  final validation accuracy: (skipped — no vLLM eval)")
 
-    import wandb as wandb_mod
-
-    run = wandb_mod.run
-    if run is not None:
-        url = getattr(run, "url", None)
-        if url:
-            _emit(f"  W&B URL: {url}")
-    wandb_mod.finish()
+    url = getattr(wandb_run, "url", None)
+    if url:
+        _emit(f"  W&B URL: {url}")
+    wandb_run.finish()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -481,6 +524,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="W&B run name; default is a timestamp if omitted.",
+    )
+    p.add_argument(
+        "--wandb_entity",
+        type=str,
+        default=None,
+        help="W&B entity (user or team). Default: unset (use `wandb login` default) or WANDB_ENTITY env.",
     )
     p.add_argument("--save_model_dir", type=str, default=None)
     p.add_argument(
