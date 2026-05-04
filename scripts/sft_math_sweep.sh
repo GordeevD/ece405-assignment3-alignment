@@ -5,7 +5,7 @@
 #   bash scripts/sft_math_sweep.sh
 
 set -euo pipefail
-: "${WANDB_PROJECT:ece405-assignment-3}"
+: "${WANDB_PROJECT:"ece405-assignment-3"}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export HF_HOME="${HF_HOME:-$ROOT/.hf_cache}"
