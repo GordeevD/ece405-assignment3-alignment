@@ -528,7 +528,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--wandb_entity",
         type=str,
-        default=None,
+        default="dmitrycq",
         help="W&B entity (user or team). Default: unset (use `wandb login` default) or WANDB_ENTITY env.",
     )
     p.add_argument("--save_model_dir", type=str, default=None)
