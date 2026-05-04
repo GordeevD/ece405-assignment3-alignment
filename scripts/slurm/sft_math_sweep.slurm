@@ -3,8 +3,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=120G
-#SBATCH --gres=gpu:2
+#SBATCH --mem=64G
+#SBATCH --gres=gpu:nvidia_h200_nvl:2
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
