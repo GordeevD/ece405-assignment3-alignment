@@ -126,82 +126,57 @@ def load_sft_records(
         if first_non_ws is None:
             return []
 
-        # JSON array mode: stream parse to avoid long silent/full-memory pauses.
+        # JSON array mode: index-based parse (linear-time over one loaded string).
         if first_non_ws == "[":
             if progress_cb is not None:
-                progress_cb("detected JSON array format; streaming parse started")
+                progress_cb("detected JSON array format; parsing array items")
 
+            rest = f.read()
+            text = "[" + rest
+            n_chars = len(text)
             decoder = json.JSONDecoder()
             out: list[dict[str, Any]] = []
-            started = True
-            ended = False
             n_items = 0
             started_at = time.time()
-            buf = ""
-            chunk_size = 1 << 20  # 1 MiB
+            idx = 1  # skip leading '['
 
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
+            while idx < n_chars:
+                while idx < n_chars and text[idx].isspace():
+                    idx += 1
+                if idx >= n_chars:
                     break
-                buf += chunk
-                idx = 0
-                while True:
-                    while idx < len(buf) and buf[idx].isspace():
-                        idx += 1
-                    if idx >= len(buf):
-                        break
-
-                    if not started:
-                        if buf[idx] != "[":
-                            raise ValueError(f"Expected '[' at start of JSON array in {path}")
-                        started = True
-                        idx += 1
-                        continue
-
-                    if buf[idx] == "]":
-                        ended = True
-                        idx += 1
-                        break
-
-                    try:
-                        obj, next_idx = decoder.raw_decode(buf, idx)
-                    except json.JSONDecodeError:
-                        # Need more bytes to decode a full object.
-                        break
-
-                    if not isinstance(obj, dict):
-                        raise ValueError(f"Expected object entries in JSON array: {path}")
-                    out.append(obj)
-                    n_items += 1
-                    if progress_cb is not None and n_items % progress_every == 0:
-                        elapsed = max(time.time() - started_at, 1e-9)
-                        progress_cb(f"parsed {n_items} JSON array rows ({n_items / elapsed:.1f} rows/s)")
-
-                    idx = next_idx
-                    while idx < len(buf) and buf[idx].isspace():
-                        idx += 1
-                    if idx < len(buf) and buf[idx] == ",":
-                        idx += 1
-                        continue
-                    if idx < len(buf) and buf[idx] == "]":
-                        ended = True
-                        idx += 1
-                        break
-
-                buf = buf[idx:]
-                if ended:
+                if text[idx] == "]":
+                    idx += 1
                     break
 
-            # Consume any trailing whitespace; ensure array properly closed.
-            if not ended:
-                tail = buf.strip()
-                if tail == "]":
-                    ended = True
-                elif tail:
-                    raise ValueError(f"Unterminated or malformed JSON array in {path}")
-            if not ended:
-                raise ValueError(f"Unterminated JSON array in {path}")
+                obj, next_idx = decoder.raw_decode(text, idx)
+                if not isinstance(obj, dict):
+                    raise ValueError(f"Expected object entries in JSON array: {path}")
+                out.append(obj)
+                n_items += 1
+                if progress_cb is not None and n_items % progress_every == 0:
+                    elapsed = max(time.time() - started_at, 1e-9)
+                    pct = 100.0 * min(next_idx, n_chars) / max(n_chars, 1)
+                    progress_cb(
+                        f"parsed {n_items} JSON array rows ({n_items / elapsed:.1f} rows/s, {pct:.1f}% bytes)"
+                    )
+
+                idx = next_idx
+                while idx < n_chars and text[idx].isspace():
+                    idx += 1
+                if idx < n_chars and text[idx] == ",":
+                    idx += 1
+                    continue
+                if idx < n_chars and text[idx] == "]":
+                    idx += 1
+                    break
+                if idx < n_chars:
+                    raise ValueError(f"Malformed JSON array separators in {path} near char {idx}")
+
+            while idx < n_chars and text[idx].isspace():
+                idx += 1
+            if idx != n_chars:
+                raise ValueError(f"Trailing content after JSON array in {path}")
 
             if progress_cb is not None:
                 elapsed = max(time.time() - started_at, 1e-9)
