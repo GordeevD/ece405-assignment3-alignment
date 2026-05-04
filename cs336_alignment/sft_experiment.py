@@ -6,6 +6,8 @@ Designed for two GPUs: policy on ``cuda:0``, vLLM engine on ``cuda:1`` (see ``--
 Example::
 
     HF_HOME="$(pwd)/.hf_cache" uv run python -m cs336_alignment.sft_experiment \\
+        --wandb_project my-ece405-runs \\
+        --wandb_run_name sft-qwen-math-01 \\
         --model_path ../../Qwen/Qwen2.5-0.5B \\
         --sft_json cs336_alignment/sft_gpt-oss-120b_filtered.jsonl \\
         --max_train_examples 512 --epochs 1 --learning_rate 3e-5 \\
@@ -17,6 +19,8 @@ import argparse
 import json
 import os
 import random
+import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 from unittest.mock import patch
@@ -32,6 +36,10 @@ from cs336_alignment.drgrpo_grader import grade, r1_zero_reward_fn
 from cs336_alignment.get_response_log_probs import get_response_log_probs
 from cs336_alignment.sft_microbatch_train_step import sft_microbatch_train_step
 from cs336_alignment.tokenize_prompt_and_output import tokenize_prompt_and_output
+
+
+def _emit(msg: str) -> None:
+    print(msg, flush=True)
 
 
 def init_vllm(
@@ -164,16 +172,20 @@ def evaluate_math_vllm(
     return {"accuracy": correct / max(total, 1), "n": float(total)}
 
 
-def _maybe_wandb_init(args: argparse.Namespace) -> Any | None:
-    if not args.wandb_project:
-        return None
+def _wandb_init(args: argparse.Namespace, extra_config: dict[str, Any]) -> Any:
     import wandb
 
-    wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=vars(args))
+    cfg = {**vars(args), **extra_config}
+    wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=cfg)
     wandb.define_metric("train_step")
     wandb.define_metric("eval_step")
     wandb.define_metric("train/*", step_metric="train_step")
     wandb.define_metric("eval/*", step_metric="eval_step")
+    url = getattr(wandb.run, "url", None) if wandb.run is not None else None
+    if url:
+        _emit(f"Weights & Biases run: {url}")
+    else:
+        _emit("Weights & Biases: run started (offline or URL not available).")
     return wandb
 
 
@@ -198,7 +210,7 @@ def train(args: argparse.Namespace) -> None:
             if grade(str(ext).strip(), str(exp).strip(), fast=True):
                 filt.append(ex)
         records = filt
-        print(f"Filtered to {len(records)} / {n_raw} examples with graded-correct extracted answers.")
+        _emit(f"Filtered to {len(records)} / {n_raw} examples with graded-correct extracted answers.")
 
     if args.max_train_examples is not None:
         records = records[: args.max_train_examples]
@@ -237,11 +249,27 @@ def train(args: argparse.Namespace) -> None:
     train_ds = SFTStringDataset(prompts, responses)
     eval_problems, eval_ground_truths = load_val_eval_pairs(Path(args.val_json).expanduser().resolve())
 
-    wb = _maybe_wandb_init(args)
+    wb = _wandb_init(
+        args,
+        {
+            "n_train_examples": len(train_ds),
+            "n_val_examples": len(eval_problems),
+            "val_json_resolved": str(Path(args.val_json).expanduser().resolve()),
+            "sft_json_resolved": str(Path(args.sft_json).expanduser().resolve()),
+        },
+    )
+
+    _emit("--- SFT configuration ---")
+    _emit(f"  train examples: {len(train_ds)}")
+    _emit(f"  val examples:   {len(eval_problems)} (from {args.val_json})")
+    _emit(f"  epochs: {args.epochs}  lr: {args.learning_rate}  microbatch: {args.train_microbatch_size}  grad_accum: {args.gradient_accumulation_steps}")
+    _emit(f"  policy_device: {args.policy_device}  vllm_device: {args.vllm_device}  skip_vllm_eval: {args.skip_vllm_eval}")
+    _emit(f"  eval every {args.eval_every_train_steps} optimizer steps")
+    _emit("-------------------------")
 
     llm: LLM | None = None
     if not args.skip_vllm_eval:
-        print(f"Starting vLLM on {args.vllm_device} …")
+        _emit(f"Starting vLLM on {args.vllm_device} …")
         llm = init_vllm(
             args.model_path,
             device=args.vllm_device,
@@ -269,15 +297,20 @@ def train(args: argparse.Namespace) -> None:
             eval_batch_size=args.eval_batch_size,
         )
         acc = metrics["accuracy"]
-        print(f"[{tag}] eval accuracy: {acc:.4f} (n={int(metrics['n'])})")
-        if wb is not None:
-            wb.log(
-                {
-                    "eval_step": eval_step,
-                    "eval/accuracy": acc,
-                    "eval/n": metrics["n"],
-                }
-            )
+        n_ev = int(metrics["n"])
+        n_ok = int(round(acc * n_ev))
+        _emit(
+            f"[eval:{tag}] step={eval_step}  accuracy={acc:.6f} ({n_ok}/{n_ev} correct)  "
+            f"({100.0 * acc:.2f}%)"
+        )
+        wb.log(
+            {
+                "eval_step": eval_step,
+                "eval/accuracy": acc,
+                "eval/n": metrics["n"],
+                "eval/n_correct": float(n_ok),
+            }
+        )
         eval_step += 1
         model.train()
         return acc
@@ -314,16 +347,22 @@ def train(args: argparse.Namespace) -> None:
                 opt.step()
                 opt.zero_grad(set_to_none=True)
                 train_step += 1
-                if wb is not None:
-                    wb.log(
-                        {
-                            "train_step": train_step,
-                            "train/loss": float(loss.item()),
-                            "train/masked_neg_log_prob_sum": float(meta["masked_neg_log_prob_sum"].item()),
-                            "train/response_token_count": float(meta["response_token_count"].item()),
-                            "train/epoch": epoch,
-                        }
-                    )
+                loss_v = float(loss.item())
+                msum = float(meta["masked_neg_log_prob_sum"].item())
+                rtok = float(meta["response_token_count"].item())
+                wb.log(
+                    {
+                        "train_step": train_step,
+                        "train/loss": loss_v,
+                        "train/masked_neg_log_prob_sum": msum,
+                        "train/response_token_count": rtok,
+                        "train/epoch": epoch,
+                    }
+                )
+                _emit(
+                    f"[train] step={train_step}  epoch={epoch}  loss={loss_v:.6f}  "
+                    f"masked_nll_sum={msum:.2f}  response_tokens={rtok:.0f}"
+                )
                 if llm is not None and train_step % args.eval_every_train_steps == 0:
                     run_eval(f"epoch{epoch}_step{train_step}")
 
@@ -335,18 +374,31 @@ def train(args: argparse.Namespace) -> None:
             if llm is not None and train_step % args.eval_every_train_steps == 0:
                 run_eval(f"epoch{epoch}_step{train_step}_tail")
 
+    final_acc = float("nan")
     if llm is not None:
-        run_eval("final")
+        final_acc = run_eval("final")
 
     if args.save_model_dir:
         out_dir = Path(args.save_model_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(out_dir)
         tokenizer.save_pretrained(out_dir)
-        print(f"Saved adapter/full model to {out_dir}")
+        _emit(f"Saved model and tokenizer to {out_dir}")
 
-    if wb is not None:
-        wb.finish()
+    _emit("--- Run finished ---")
+    if final_acc == final_acc:  # not NaN
+        _emit(f"  final validation accuracy: {final_acc:.6f} ({100.0 * final_acc:.2f}%)")
+    else:
+        _emit("  final validation accuracy: (skipped — no vLLM eval)")
+
+    import wandb as wandb_mod
+
+    run = wandb_mod.run
+    if run is not None:
+        url = getattr(run, "url", None)
+        if url:
+            _emit(f"  W&B URL: {url}")
+    wandb_mod.finish()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -379,8 +431,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--vllm_max_num_seqs", type=int, default=64)
     p.add_argument("--skip_vllm_eval", action="store_true", help="Train only (single GPU / no vLLM).")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--wandb_project", type=str, default=None)
-    p.add_argument("--wandb_run_name", type=str, default=None)
+    p.add_argument(
+        "--wandb_project",
+        type=str,
+        required=True,
+        help="Weights & Biases project name (required). Log in with `wandb login` or set WANDB_API_KEY.",
+    )
+    p.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default=None,
+        help="W&B run name; default is a timestamp if omitted.",
+    )
     p.add_argument("--save_model_dir", type=str, default=None)
     p.add_argument(
         "--hf_home",
@@ -393,6 +455,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    if not args.wandb_run_name:
+        args.wandb_run_name = datetime.now().strftime("sft-%Y%m%d-%H%M%S")
+    try:
+        import wandb as _wandb_check
+    except ImportError:
+        print("ERROR: the `wandb` package is required. Install with: uv pip install wandb", flush=True)
+        sys.exit(1)
+    del _wandb_check
     train(args)
 
 

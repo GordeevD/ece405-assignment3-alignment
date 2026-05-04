@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Example sweep for Problem (sft_experiment): train on 128 / 256 / 512 / 1024 / full examples.
-# From repo root with two GPUs (policy cuda:0, vLLM cuda:1):
-#   export WANDB_PROJECT=my-sft-math   # optional
+# From repo root with two GPUs (policy cuda:0, vLLM cuda:1). W&B is required.
+#   export WANDB_PROJECT=my-sft-math
 #   bash scripts/sft_math_sweep.sh
 
 set -euo pipefail
+: "${WANDB_PROJECT:ece405-assignment-3}"
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export HF_HOME="${HF_HOME:-$ROOT/.hf_cache}"
 MODEL="${MODEL_PATH:-$ROOT/../Qwen/Qwen2.5-0.5B}"
@@ -23,7 +25,9 @@ for N in 128 256 512 1024 "full"; do
     MAX_ARGS=(--max_train_examples "$N")
   fi
 
-  CMD=(uv run python -m cs336_alignment.sft_experiment
+  (cd "$ROOT" && uv run python -m cs336_alignment.sft_experiment
+    --wandb_project "$WANDB_PROJECT"
+    --wandb_run_name "$RUN"
     --model_path "$MODEL"
     --sft_json "$SFT_JSON"
     --epochs "$EPOCHS"
@@ -31,12 +35,4 @@ for N in 128 256 512 1024 "full"; do
     --train_microbatch_size "$MBS"
     --gradient_accumulation_steps "$GAS"
     "${MAX_ARGS[@]}")
-
-  if [[ -n "${WANDB_PROJECT:-}" ]]; then
-    CMD+=(--wandb_project "$WANDB_PROJECT" --wandb_run_name "$RUN")
-    else
-    CMD+=(--wandb_project "ece405-assignment-3" --wandb_run_name "$RUN")
-  fi
-
-  (cd "$ROOT" && "${CMD[@]}")
 done
