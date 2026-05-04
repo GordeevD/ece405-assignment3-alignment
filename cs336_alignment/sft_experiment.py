@@ -21,9 +21,10 @@ import math
 import os
 import random
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from unittest.mock import patch
 
 import torch
@@ -102,20 +103,64 @@ def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM) -> None:
     llm_model.load_weights(state_dict.items())
 
 
-def load_sft_records(path: Path) -> list[dict[str, Any]]:
-    raw = path.read_text(encoding="utf-8").strip()
-    if raw.startswith("["):
-        data = json.loads(raw)
-        if not isinstance(data, list):
-            raise ValueError(f"Expected JSON array in {path}")
-        return data
-    out: list[dict[str, Any]] = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        out.append(json.loads(line))
-    return out
+def load_sft_records(
+    path: Path,
+    *,
+    progress_cb: Callable[[str], None] | None = None,
+    progress_every: int = 2000,
+) -> list[dict[str, Any]]:
+    path = path.expanduser().resolve()
+    if progress_cb is not None:
+        progress_cb(f"reading records from {path}")
+
+    with path.open("r", encoding="utf-8") as f:
+        first_non_ws: str | None = None
+        while True:
+            ch = f.read(1)
+            if ch == "":
+                break
+            if not ch.isspace():
+                first_non_ws = ch
+                break
+
+        if first_non_ws is None:
+            return []
+
+        # JSON array mode: parse whole payload.
+        if first_non_ws == "[":
+            if progress_cb is not None:
+                progress_cb("detected JSON array format; parsing full payload")
+            rest = f.read()
+            data = json.loads(first_non_ws + rest)
+            if not isinstance(data, list):
+                raise ValueError(f"Expected JSON array in {path}")
+            if progress_cb is not None:
+                progress_cb(f"parsed JSON array with {len(data)} records")
+            return data
+
+        # JSONL mode: stream with progress updates.
+        out: list[dict[str, Any]] = []
+        first_line = (first_non_ws + f.readline()).strip()
+        n_lines = 0
+        started = time.time()
+        if first_line:
+            out.append(json.loads(first_line))
+            n_lines = 1
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line:
+                continue
+            out.append(json.loads(line))
+            n_lines += 1
+            if progress_cb is not None and n_lines % progress_every == 0:
+                elapsed = max(time.time() - started, 1e-9)
+                rate = n_lines / elapsed
+                progress_cb(f"loaded {n_lines} JSONL rows ({rate:.1f} rows/s)")
+        if progress_cb is not None:
+            elapsed = max(time.time() - started, 1e-9)
+            rate = n_lines / elapsed if n_lines else 0.0
+            progress_cb(f"completed JSONL load: {n_lines} rows ({rate:.1f} rows/s)")
+        return out
 
 
 def build_prompt(problem: str, template: str) -> str:
@@ -276,7 +321,7 @@ def train(args: argparse.Namespace) -> None:
     _next_terminal_step(step_log, f"reading prompt template: {args.prompt_template_path}")
     template = Path(args.prompt_template_path).read_text(encoding="utf-8")
     _next_terminal_step(step_log, f"loading SFT JSON: {args.sft_json}")
-    records = load_sft_records(Path(args.sft_json))
+    records = load_sft_records(Path(args.sft_json), progress_cb=_emit)
     _next_terminal_step(step_log, f"loaded {len(records)} raw SFT records")
     n_raw = len(records)
     if args.filtered_only:
@@ -631,7 +676,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max_train_examples", type=int, default=None, help="Cap number of SFT records (e.g. 128, 256, …).")
     p.add_argument("--filtered_only", action="store_true", help="Keep only rows whose extracted answer grades correct.")
     p.add_argument("--epochs", type=int, default=1)
-    p.add_argument("--learning_rate", type=float, default=3e-5)
+    p.add_argument(
+        "--learning_rate",
+        type=float,
+        nargs="?",
+        const=3e-5,
+        default=3e-5,
+        help="AdamW learning rate. If flag is provided without a value, defaults to 3e-5.",
+    )
     p.add_argument("--weight_decay", type=float, default=0.01)
     p.add_argument("--train_microbatch_size", type=int, default=1)
     p.add_argument("--gradient_accumulation_steps", type=int, default=8)
