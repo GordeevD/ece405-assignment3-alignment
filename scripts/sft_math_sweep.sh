@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Example sweep for Problem (sft_experiment): train on 128 / 256 / 512 / 1024 / full examples.
 # From repo root with two GPUs (policy cuda:0, vLLM cuda:1). W&B is required.
-#   export WANDB_PROJECT=my-sft-math
+#   export WANDB_PROJECT=my-sft-math   # optional; default below if unset
 #   bash scripts/sft_math_sweep.sh
 
 set -euo pipefail
-: "${WANDB_PROJECT:"ece405-assignment-3"}"
+# Default W&B project when unset (syntax is ${VAR:-default}, not ${VAR:"default"}).
+WANDB_PROJECT="${WANDB_PROJECT:-ece405-assignment-3}"
+export WANDB_PROJECT
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export HF_HOME="${HF_HOME:-$ROOT/.hf_cache}"
