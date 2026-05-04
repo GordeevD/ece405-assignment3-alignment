@@ -107,7 +107,7 @@ def load_sft_records(
     path: Path,
     *,
     progress_cb: Callable[[str], None] | None = None,
-    progress_every: int = 2000,
+    progress_every: int = 500,
 ) -> list[dict[str, Any]]:
     path = path.expanduser().resolve()
     if progress_cb is not None:
@@ -131,9 +131,16 @@ def load_sft_records(
             if progress_cb is not None:
                 progress_cb("detected JSON array format; parsing array items")
 
+            read_started_at = time.time()
             rest = f.read()
             text = "[" + rest
             n_chars = len(text)
+            if progress_cb is not None:
+                read_elapsed = max(time.time() - read_started_at, 1e-9)
+                progress_cb(
+                    f"read JSON array payload: {n_chars / (1024 * 1024):.1f} MiB in {read_elapsed:.1f}s "
+                    f"({(n_chars / (1024 * 1024)) / read_elapsed:.1f} MiB/s)"
+                )
             decoder = json.JSONDecoder()
             out: list[dict[str, Any]] = []
             n_items = 0
@@ -371,13 +378,20 @@ def train(args: argparse.Namespace) -> None:
     n_raw = len(records)
     if args.filtered_only:
         filt: list[dict[str, Any]] = []
-        for ex in records:
+        filter_started_at = time.time()
+        for i, ex in enumerate(records, start=1):
             exp = ex.get("expected_answer")
             ext = ex.get("extracted_answer")
             if exp is None or ext is None:
                 continue
             if grade(str(ext).strip(), str(exp).strip(), fast=True):
                 filt.append(ex)
+            if i % 2000 == 0:
+                elapsed = max(time.time() - filter_started_at, 1e-9)
+                _emit(
+                    f"filter progress: {i}/{n_raw} rows checked ({100.0 * i / max(n_raw, 1):.1f}%), "
+                    f"kept={len(filt)} ({i / elapsed:.1f} rows/s)"
+                )
         records = filt
         _next_terminal_step(
             step_log,
@@ -397,7 +411,9 @@ def train(args: argparse.Namespace) -> None:
 
     prompts = []
     responses = []
-    for ex in records:
+    build_started_at = time.time()
+    n_records = len(records)
+    for i, ex in enumerate(records, start=1):
         problem = ex.get("problem")
         trace = ex.get("reasoning_trace")
         if ex.get("prompt") is not None and ex.get("response") is not None:
@@ -408,6 +424,12 @@ def train(args: argparse.Namespace) -> None:
             responses.append(str(trace))
         else:
             continue
+        if i % 2000 == 0:
+            elapsed = max(time.time() - build_started_at, 1e-9)
+            _emit(
+                f"build progress: {i}/{n_records} rows converted ({100.0 * i / max(n_records, 1):.1f}%), "
+                f"usable={len(prompts)} ({i / elapsed:.1f} rows/s)"
+            )
 
     if not prompts:
         raise RuntimeError("No training examples after parsing; check JSON fields (problem, reasoning_trace).")
@@ -555,6 +577,7 @@ def train(args: argparse.Namespace) -> None:
         last_loss_v: float | None = None
         last_msum: float | None = None
         last_rtok: float | None = None
+        epoch_started_at = time.time()
         for batch in pbar:
             tok_batch = tokenize_prompt_and_output(
                 batch["prompt"],
@@ -578,6 +601,17 @@ def train(args: argparse.Namespace) -> None:
             last_msum = float(meta["masked_neg_log_prob_sum"].item())
             last_rtok = float(meta["response_token_count"].item())
             accum += 1
+            if accum % 200 == 0:
+                elapsed = max(time.time() - epoch_started_at, 1e-9)
+                hb_line = (
+                    f"epoch {epoch + 1}/{args.epochs} heartbeat: microbatch {accum}/{n_microbatches} "
+                    f"({100.0 * accum / max(n_microbatches, 1):.1f}%), "
+                    f"opt_steps={train_step}, {accum / elapsed:.2f} microbatches/s"
+                )
+                if args.no_progress_bar:
+                    _emit(hb_line)
+                else:
+                    tqdm.write(hb_line)
             if accum % args.gradient_accumulation_steps == 0:
                 nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 opt.step()
