@@ -298,3 +298,10 @@ accuracy you achieve.
 Deliverable: Report the size of the dataset and the validation accuracy curve you achieve.
 Compare your findings to the previous SFT experiment.
 
+Answer:
+
+cs336_alignment/sft_gpt-oss-120b_filtered.jsonl
+cs336_alignment/sft_val.jsonl
+cs336_alignment/sft_experiment.py
+scripts/sft_math_sweep.sh
+

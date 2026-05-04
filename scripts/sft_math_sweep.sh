@@ -20,6 +20,15 @@ LR="${LR:-3e-5}"
 EPOCHS="${EPOCHS:-1}"
 GAS="${GRADIENT_ACCUMULATION_STEPS:-8}"
 MBS="${TRAIN_MICROBATCH_SIZE:-1}"
+# vLLM eval dominates runtime: each eval copies full weights to the vLLM worker.
+EVAL_EVERY_TRAIN_STEPS="${EVAL_EVERY_TRAIN_STEPS:-200}"
+WANDB_LOG_TRAIN_EVERY="${WANDB_LOG_TRAIN_EVERY:-10}"
+TRAIN_LOG_TERMINAL_EVERY="${TRAIN_LOG_TERMINAL_EVERY:-50}"
+# Set EVAL_AT_START=1 once if you want a W&B point at train_step 0 (base model).
+EVAL_AT_START_ARGS=()
+if [[ "${EVAL_AT_START:-0}" == "1" ]]; then
+  EVAL_AT_START_ARGS=(--eval_at_start)
+fi
 
 for N in 128 256 512 1024 "full"; do
   if [[ "$N" == "full" ]]; then
@@ -43,5 +52,9 @@ for N in 128 256 512 1024 "full"; do
     --learning_rate "$LR"
     --train_microbatch_size "$MBS"
     --gradient_accumulation_steps "$GAS"
+    --eval_every_train_steps "$EVAL_EVERY_TRAIN_STEPS"
+    --wandb_log_train_every "$WANDB_LOG_TRAIN_EVERY"
+    --train_log_terminal_every "$TRAIN_LOG_TERMINAL_EVERY"
+    "${EVAL_AT_START_ARGS[@]}"
     "${MAX_ARGS[@]}")
 done

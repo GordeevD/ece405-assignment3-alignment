@@ -3,6 +3,10 @@ Supervised fine-tuning on MATH-style reasoning traces with periodic vLLM evaluat
 
 Designed for two GPUs: policy on ``cuda:0``, vLLM engine on ``cuda:1`` (see ``--policy_device`` / ``--vllm_device``).
 
+JSON training files may be either JSONL or a single JSON array; array files are parsed in chunks
+(so capped ``--max_train_examples`` runs do not read the whole file, and full runs avoid one
+giant in-memory string).
+
 Example::
 
     HF_HOME="$(pwd)/.hf_cache" uv run python -m cs336_alignment.sft_experiment \\
@@ -24,7 +28,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, TextIO
 from unittest.mock import patch
 
 import torch
@@ -103,11 +107,113 @@ def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM) -> None:
     llm_model.load_weights(state_dict.items())
 
 
+def _load_json_array_streaming(
+    f: TextIO,
+    path: Path,
+    *,
+    max_records: int | None,
+    progress_cb: Callable[[str], None] | None,
+    progress_every: int,
+) -> list[dict[str, Any]]:
+    """Parse a top-level JSON array of objects without loading the whole file into RAM.
+
+    The file handle must be positioned immediately after the opening ``[`` (that byte
+    must already have been consumed). Stops early when ``max_records`` is reached (skips
+    reading/decoding the remainder of the file).
+    """
+    decoder = json.JSONDecoder()
+    buf = ""
+    chunk_size = 4 * 1024 * 1024
+    out: list[dict[str, Any]] = []
+    n_items = 0
+    started_at = time.time()
+    bytes_read = 0
+    ended_with_bracket = False
+
+    def refill() -> bool:
+        nonlocal buf, bytes_read
+        chunk = f.read(chunk_size)
+        if chunk:
+            bytes_read += len(chunk)
+            buf += chunk
+            return True
+        return False
+
+    while True:
+        buf = buf.lstrip()
+        if not buf:
+            if not refill():
+                break
+            continue
+
+        if buf[0] == "]":
+            buf = buf[1:]
+            ended_with_bracket = True
+            break
+
+        pos = 0
+        while pos < len(buf) and buf[pos].isspace():
+            pos += 1
+        if pos >= len(buf):
+            buf = ""
+            continue
+        if buf[pos] == "]":
+            buf = buf[pos + 1 :]
+            ended_with_bracket = True
+            break
+
+        try:
+            obj, end = decoder.raw_decode(buf, pos)
+        except json.JSONDecodeError:
+            if not refill():
+                raise ValueError(f"Incomplete or invalid JSON array near entry {n_items + 1} in {path}") from None
+            continue
+
+        if not isinstance(obj, dict):
+            raise ValueError(f"Expected object entries in JSON array: {path}")
+        out.append(obj)
+        n_items += 1
+        if progress_cb is not None and n_items % progress_every == 0:
+            elapsed = max(time.time() - started_at, 1e-9)
+            mib = bytes_read / (1024 * 1024)  # UTF-8 chars ≈ bytes for ASCII-heavy JSON
+            progress_cb(
+                f"parsed {n_items} JSON array rows ({n_items / elapsed:.1f} rows/s, ~{mib:.1f} MiB read)"
+            )
+
+        buf = buf[end:].lstrip()
+        if buf.startswith(","):
+            buf = buf[1:]
+        if max_records is not None and n_items >= max_records:
+            if progress_cb is not None:
+                elapsed = max(time.time() - started_at, 1e-9)
+                progress_cb(
+                    f"stopped JSON array load early at max_records={max_records} "
+                    f"({n_items} rows, {n_items / elapsed:.1f} rows/s)"
+                )
+            return out
+
+    if max_records is None and not ended_with_bracket:
+        raise ValueError(f"JSON array in {path} ended before closing ']' (incomplete file or truncated JSON)")
+
+    if max_records is None:
+        buf = buf.lstrip()
+        while buf or refill():
+            buf = buf.lstrip()
+            if buf:
+                raise ValueError(f"Trailing content after JSON array in {path}: {buf[:120]!r}")
+
+    if progress_cb is not None:
+        elapsed = max(time.time() - started_at, 1e-9)
+        progress_cb(f"completed JSON array load: {n_items} rows ({n_items / elapsed:.1f} rows/s)")
+    return out
+
+
 def load_sft_records(
     path: Path,
     *,
     progress_cb: Callable[[str], None] | None = None,
     progress_every: int = 500,
+    max_records: int | None = None,
 ) -> list[dict[str, Any]]:
     path = path.expanduser().resolve()
     if progress_cb is not None:
@@ -126,69 +232,20 @@ def load_sft_records(
         if first_non_ws is None:
             return []
 
-        # JSON array mode: index-based parse (linear-time over one loaded string).
+        # JSON array mode: chunked read + incremental decode (bounded RAM; optional early stop).
         if first_non_ws == "[":
             if progress_cb is not None:
-                progress_cb("detected JSON array format; parsing array items")
-
-            read_started_at = time.time()
-            rest = f.read()
-            text = "[" + rest
-            n_chars = len(text)
-            if progress_cb is not None:
-                read_elapsed = max(time.time() - read_started_at, 1e-9)
                 progress_cb(
-                    f"read JSON array payload: {n_chars / (1024 * 1024):.1f} MiB in {read_elapsed:.1f}s "
-                    f"({(n_chars / (1024 * 1024)) / read_elapsed:.1f} MiB/s)"
+                    "detected JSON array format; streaming parse"
+                    + (f" (max_records={max_records})" if max_records is not None else "")
                 )
-            decoder = json.JSONDecoder()
-            out: list[dict[str, Any]] = []
-            n_items = 0
-            started_at = time.time()
-            idx = 1  # skip leading '['
-
-            while idx < n_chars:
-                while idx < n_chars and text[idx].isspace():
-                    idx += 1
-                if idx >= n_chars:
-                    break
-                if text[idx] == "]":
-                    idx += 1
-                    break
-
-                obj, next_idx = decoder.raw_decode(text, idx)
-                if not isinstance(obj, dict):
-                    raise ValueError(f"Expected object entries in JSON array: {path}")
-                out.append(obj)
-                n_items += 1
-                if progress_cb is not None and n_items % progress_every == 0:
-                    elapsed = max(time.time() - started_at, 1e-9)
-                    pct = 100.0 * min(next_idx, n_chars) / max(n_chars, 1)
-                    progress_cb(
-                        f"parsed {n_items} JSON array rows ({n_items / elapsed:.1f} rows/s, {pct:.1f}% bytes)"
-                    )
-
-                idx = next_idx
-                while idx < n_chars and text[idx].isspace():
-                    idx += 1
-                if idx < n_chars and text[idx] == ",":
-                    idx += 1
-                    continue
-                if idx < n_chars and text[idx] == "]":
-                    idx += 1
-                    break
-                if idx < n_chars:
-                    raise ValueError(f"Malformed JSON array separators in {path} near char {idx}")
-
-            while idx < n_chars and text[idx].isspace():
-                idx += 1
-            if idx != n_chars:
-                raise ValueError(f"Trailing content after JSON array in {path}")
-
-            if progress_cb is not None:
-                elapsed = max(time.time() - started_at, 1e-9)
-                progress_cb(f"completed JSON array load: {n_items} rows ({n_items / elapsed:.1f} rows/s)")
-            return out
+            return _load_json_array_streaming(
+                f,
+                path,
+                max_records=max_records,
+                progress_cb=progress_cb,
+                progress_every=progress_every,
+            )
 
         # JSONL mode: stream with progress updates.
         out: list[dict[str, Any]] = []
@@ -198,12 +255,20 @@ def load_sft_records(
         if first_line:
             out.append(json.loads(first_line))
             n_lines = 1
+            if max_records is not None and n_lines >= max_records:
+                if progress_cb is not None:
+                    progress_cb(f"stopped JSONL load early at max_records={max_records}")
+                return out
         for raw_line in f:
             line = raw_line.strip()
             if not line:
                 continue
             out.append(json.loads(line))
             n_lines += 1
+            if max_records is not None and n_lines >= max_records:
+                if progress_cb is not None:
+                    progress_cb(f"stopped JSONL load early at max_records={max_records}")
+                return out
             if progress_cb is not None and n_lines % progress_every == 0:
                 elapsed = max(time.time() - started, 1e-9)
                 rate = n_lines / elapsed
@@ -389,7 +454,14 @@ def train(args: argparse.Namespace) -> None:
     _next_terminal_step(step_log, f"reading prompt template: {args.prompt_template_path}")
     template = Path(args.prompt_template_path).read_text(encoding="utf-8")
     _next_terminal_step(step_log, f"loading SFT JSON: {args.sft_json}")
-    records = load_sft_records(Path(args.sft_json), progress_cb=_emit)
+    load_max: int | None = None
+    if (not args.filtered_only) and args.max_train_examples is not None:
+        load_max = args.max_train_examples
+    records = load_sft_records(
+        Path(args.sft_json),
+        progress_cb=_emit,
+        max_records=load_max,
+    )
     _next_terminal_step(step_log, f"loaded {len(records)} raw SFT records")
     n_raw = len(records)
     if args.filtered_only:
@@ -502,7 +574,11 @@ def train(args: argparse.Namespace) -> None:
     _emit(f"  val examples:   {len(eval_problems)} (from {args.val_json})")
     _emit(f"  epochs: {args.epochs}  lr: {args.learning_rate}  microbatch: {args.train_microbatch_size}  grad_accum: {args.gradient_accumulation_steps}")
     _emit(f"  policy_device: {args.policy_device}  vllm_device: {args.vllm_device}  skip_vllm_eval: {args.skip_vllm_eval}")
-    _emit(f"  eval every {args.eval_every_train_steps} optimizer steps")
+    _emit(
+        f"  eval every {args.eval_every_train_steps} optimizer steps "
+        f"(eval_at_start={args.eval_at_start}, "
+        f"eval_after_first_step={not args.no_eval_after_first_optimizer_step})"
+    )
     _emit("-------------------------")
 
     llm: LLM | None = None
@@ -536,17 +612,18 @@ def train(args: argparse.Namespace) -> None:
             f"eval:{tag} — sync policy to vLLM, generate on {len(eval_problems)} val items",
         )
         model.eval()
-        load_policy_into_vllm_instance(model, llm)
-        metrics = evaluate_math_vllm(
-            llm,
-            template,
-            eval_problems,
-            eval_ground_truths,
-            max_gen_tokens=args.eval_max_tokens,
-            eval_batch_size=args.eval_batch_size,
-            show_progress=not args.no_progress_bar,
-            desc=f"eval:{tag}",
-        )
+        with torch.inference_mode():
+            load_policy_into_vllm_instance(model, llm)
+            metrics = evaluate_math_vllm(
+                llm,
+                template,
+                eval_problems,
+                eval_ground_truths,
+                max_gen_tokens=args.eval_max_tokens,
+                eval_batch_size=args.eval_batch_size,
+                show_progress=not args.no_progress_bar,
+                desc=f"eval:{tag}",
+            )
         acc = metrics["accuracy"]
         n_ev = int(metrics["n"])
         n_ok = int(round(acc * n_ev))
@@ -567,11 +644,25 @@ def train(args: argparse.Namespace) -> None:
         model.train()
         return acc
 
-    if llm is not None:
+    if llm is not None and args.eval_at_start:
         run_eval("init")
+    elif llm is not None:
+        _next_terminal_step(step_log, "skipping pre-train eval (pass --eval_at_start for a baseline validation point)")
 
     n_microbatches = max(1, math.ceil(len(train_ds) / args.train_microbatch_size))
     use_tqdm_write_for_train = not args.no_progress_bar
+
+    def should_run_mid_train_eval(step: int) -> bool:
+        if step <= 0:
+            return False
+        if step % args.eval_every_train_steps == 0:
+            return True
+        return (
+            (not args.no_eval_after_first_optimizer_step)
+            and step == 1
+            and args.eval_every_train_steps != 1
+        )
+
     for epoch in range(args.epochs):
         _next_terminal_step(
             step_log,
@@ -636,28 +727,33 @@ def train(args: argparse.Namespace) -> None:
                 loss_v = last_loss_v
                 msum = last_msum
                 rtok = last_rtok
-                wandb_run.log(
-                    {
-                        "train_step": train_step,
-                        "train/loss": loss_v,
-                        "train/masked_neg_log_prob_sum": msum,
-                        "train/response_token_count": rtok,
-                        "train/epoch": float(epoch),
-                    },
-                    commit=True,
-                )
+                if train_step % args.wandb_log_train_every == 0 or train_step == 1:
+                    wandb_run.log(
+                        {
+                            "train_step": train_step,
+                            "train/loss": loss_v,
+                            "train/masked_neg_log_prob_sum": msum,
+                            "train/response_token_count": rtok,
+                            "train/epoch": float(epoch),
+                        },
+                        commit=True,
+                    )
                 pbar.set_postfix(
                     opt_step=train_step,
                     loss=f"{loss_v:.4f}",
                     rtok=int(rtok),
                 )
-                _next_terminal_step_tqdm_safe(
-                    step_log,
-                    f"optimizer step {train_step} (epoch {epoch + 1}/{args.epochs}) — "
-                    f"loss={loss_v:.6f} masked_nll_sum={msum:.4f} response_tokens={int(rtok)}",
-                    use_tqdm_write=use_tqdm_write_for_train,
-                )
-                if llm is not None and train_step % args.eval_every_train_steps == 0:
+                if (
+                    train_step % args.train_log_terminal_every == 0
+                    or train_step == 1
+                ):
+                    _next_terminal_step_tqdm_safe(
+                        step_log,
+                        f"optimizer step {train_step} (epoch {epoch + 1}/{args.epochs}) — "
+                        f"loss={loss_v:.6f} masked_nll_sum={msum:.4f} response_tokens={int(rtok)}",
+                        use_tqdm_write=use_tqdm_write_for_train,
+                    )
+                if llm is not None and should_run_mid_train_eval(train_step):
                     run_eval(f"epoch{epoch}_step{train_step}")
 
         if accum % args.gradient_accumulation_steps != 0:
@@ -696,7 +792,7 @@ def train(args: argparse.Namespace) -> None:
                     "no loss stats (skipped microbatch loop?)",
                     use_tqdm_write=use_tqdm_write_for_train,
                 )
-            if llm is not None and train_step % args.eval_every_train_steps == 0:
+            if llm is not None and should_run_mid_train_eval(train_step):
                 run_eval(f"epoch{epoch}_step{train_step}_tail")
 
     _next_terminal_step(step_log, "all training epochs complete")
@@ -783,7 +879,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--train_microbatch_size", type=int, default=1)
     p.add_argument("--gradient_accumulation_steps", type=int, default=8)
     p.add_argument("--max_grad_norm", type=float, default=1.0)
-    p.add_argument("--eval_every_train_steps", type=int, default=50)
+    p.add_argument(
+        "--eval_every_train_steps",
+        type=int,
+        default=200,
+        help="Run vLLM validation every N optimizer steps (each eval syncs full weights to vLLM).",
+    )
+    p.add_argument(
+        "--eval_at_start",
+        action="store_true",
+        help="Run one validation pass before any training (baseline on the base checkpoint).",
+    )
+    p.add_argument(
+        "--no_eval_after_first_optimizer_step",
+        action="store_true",
+        help="Do not run an extra validation right after optimizer step 1 (only matters when eval_every > 1).",
+    )
+    p.add_argument(
+        "--wandb_log_train_every",
+        type=int,
+        default=10,
+        help="Log train loss metrics to W&B every N optimizer steps (reduces sync overhead).",
+    )
+    p.add_argument(
+        "--train_log_terminal_every",
+        type=int,
+        default=50,
+        help="Print per-optimizer-step terminal messages every N steps (step 1 always logs).",
+    )
     p.add_argument("--eval_max_tokens", type=int, default=2048)
     p.add_argument("--eval_batch_size", type=int, default=16)
     p.add_argument("--policy_device", type=str, default="cuda:0")
