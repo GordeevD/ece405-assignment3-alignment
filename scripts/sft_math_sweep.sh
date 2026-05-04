@@ -5,6 +5,9 @@
 #   bash scripts/sft_math_sweep.sh
 
 set -euo pipefail
+# Unbuffered Python so Slurm / file logs show lines as they happen.
+export PYTHONUNBUFFERED=1
+
 # Default W&B project when unset (syntax is ${VAR:-default}, not ${VAR:"default"}).
 WANDB_PROJECT="${WANDB_PROJECT:-ece405-assignment-3}"
 export WANDB_PROJECT
@@ -27,7 +30,11 @@ for N in 128 256 512 1024 "full"; do
     MAX_ARGS=(--max_train_examples "$N")
   fi
 
-  (cd "$ROOT" && uv run python -m cs336_alignment.sft_experiment
+  echo "================================================================================"
+  echo "sft_math_sweep: starting run N=${N} WANDB_PROJECT=${WANDB_PROJECT} RUN=${RUN}"
+  echo "================================================================================"
+
+  (cd "$ROOT" && uv run python -u -m cs336_alignment.sft_experiment
     --wandb_project "$WANDB_PROJECT"
     --wandb_run_name "$RUN"
     --model_path "$MODEL"

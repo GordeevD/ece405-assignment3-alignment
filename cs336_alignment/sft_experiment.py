@@ -237,6 +237,7 @@ def _wandb_init(args: argparse.Namespace, extra_config: dict[str, Any]) -> Any:
 
 
 def train(args: argparse.Namespace) -> None:
+    _emit("sft_experiment: starting (loading data; model and W&B init come next)…")
     device = torch.device(args.policy_device)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -244,8 +245,10 @@ def train(args: argparse.Namespace) -> None:
     if args.hf_home:
         os.environ.setdefault("HF_HOME", str(Path(args.hf_home).expanduser().resolve()))
 
+    _emit(f"Loading SFT JSON: {args.sft_json}")
     template = Path(args.prompt_template_path).read_text(encoding="utf-8")
     records = load_sft_records(Path(args.sft_json))
+    _emit(f"Loaded {len(records)} raw records from SFT file")
     n_raw = len(records)
     if args.filtered_only:
         filt: list[dict[str, Any]] = []
@@ -279,6 +282,21 @@ def train(args: argparse.Namespace) -> None:
     if not prompts:
         raise RuntimeError("No training examples after parsing; check JSON fields (problem, reasoning_trace).")
 
+    train_ds = SFTStringDataset(prompts, responses)
+    eval_problems, eval_ground_truths = load_val_eval_pairs(Path(args.val_json).expanduser().resolve())
+
+    # W&B before model load so runs appear immediately and failures still create a partial run.
+    wandb_run = _wandb_init(
+        args,
+        {
+            "n_train_examples": len(train_ds),
+            "n_val_examples": len(eval_problems),
+            "val_json_resolved": str(Path(args.val_json).expanduser().resolve()),
+            "sft_json_resolved": str(Path(args.sft_json).expanduser().resolve()),
+        },
+    )
+
+    _emit("Loading tokenizer and policy model (this can take several minutes on first run)…")
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -292,19 +310,6 @@ def train(args: argparse.Namespace) -> None:
     model.train()
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-
-    train_ds = SFTStringDataset(prompts, responses)
-    eval_problems, eval_ground_truths = load_val_eval_pairs(Path(args.val_json).expanduser().resolve())
-
-    wandb_run = _wandb_init(
-        args,
-        {
-            "n_train_examples": len(train_ds),
-            "n_val_examples": len(eval_problems),
-            "val_json_resolved": str(Path(args.val_json).expanduser().resolve()),
-            "sft_json_resolved": str(Path(args.sft_json).expanduser().resolve()),
-        },
-    )
 
     _emit("--- SFT configuration ---")
     _emit(f"  train examples: {len(train_ds)}")
@@ -528,8 +533,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--wandb_entity",
         type=str,
-        default="dmitrycq",
-        help="W&B entity (user or team). Default: unset (use `wandb login` default) or WANDB_ENTITY env.",
+        default=None,
+        help="W&B entity (user or team). Default: WANDB_ENTITY env or `wandb login` default.",
     )
     p.add_argument("--save_model_dir", type=str, default=None)
     p.add_argument(
@@ -542,6 +547,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # Line-buffer stdout when supported (batch jobs often use fully buffered stdout otherwise).
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+
     args = build_arg_parser().parse_args()
     if not args.wandb_run_name:
         args.wandb_run_name = datetime.now().strftime("sft-%Y%m%d-%H%M%S")
@@ -551,6 +563,7 @@ def main() -> None:
         print("ERROR: the `wandb` package is required. Install with: uv pip install wandb", flush=True)
         sys.exit(1)
     del _wandb_check
+    print(f"sft_experiment: parsed args (project={args.wandb_project!r}, run={args.wandb_run_name!r})", flush=True)
     train(args)
 
 
