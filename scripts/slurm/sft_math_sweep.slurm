@@ -1,8 +1,9 @@
 #!/bin/bash
+#SBATCH --partition=kill-shared
 #SBATCH --job-name=sft-math-sweep
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+# #SBATCH --nodes=1
+# #SBATCH --ntasks=1
+# #SBATCH --cpus-per-task=20
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:nvidia_h200_nvl:2
 #SBATCH --time=08:00:00
