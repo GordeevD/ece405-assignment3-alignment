@@ -270,3 +270,31 @@ run pytest -k test_sft_microbatch_train_step and confirm it passes.
 Answer:
 
 cs336_alignment/sft_microbatch_train_step.py
+
+
+
+Logging generations in-the-loop.
+
+Problem (log_generations): Logging generations (1 point)
+Deliverable: Implement a function log_generations that can be used to log generations from your
+model
+
+Answer:
+cs336_alignment/log_generations.py
+
+
+
+4.3 SFT Experiment
+
+Problem (sft_experiment): Run SFT on the MATH dataset (2 points) (2 H100 hrs)
+1. Run SFT on the reasoning SFT examples (provided in cs336_alignment/sft_gpt-oss-120b_filtered.jsonl)
+using the ../../Qwen/Qwen2.5-0.5B base model, varying the number of unique examples for SFT in 
+the range {128, 256, 512, 1024}, along with using the full dataset. Tune the learning rate and
+batch size to achieve at least 15% validation accuracy when using the full dataset.
+Deliverable: Validation accuracy curves associated with different dataset sizes.
+2. Filter the reasoning SFT examples to only include examples that produce the correct answer. Run
+SFT on the (full) filtered dataset and report the size of the filtered dataset and the validation
+accuracy you achieve.
+Deliverable: Report the size of the dataset and the validation accuracy curve you achieve.
+Compare your findings to the previous SFT experiment.
+
