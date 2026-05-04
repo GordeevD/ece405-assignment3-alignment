@@ -1,0 +1,231 @@
+3.2 Zero-shot MATH Baseline
+
+Problem (math_baseline): 4 points
+(a) Write a script to evaluate Qwen 2.5 Math 1.5B zero-shot performance on MATH. This script
+should (1) load the MATH validation examples from /data/a5-alignment/MATH/validation.jsonl,
+(2) format them as string prompts to the language model using the r1_zero prompt, and (3) gen-
+erate outputs for each example. This script should also (4) calculate evaluation metrics and
+(5) serialize the examples, model generations, and corresponding evaluation scores to disk for
+analysis in subsequent problems.
+It might be helpful for your implementation to include a method evaluate_vllm with arguments
+similar to the following, as you will be able to reuse it later:
+def evaluate_vllm(
+vllm_model: LLM,
+reward_fn: Callable[[str, str], dict[str, float]],
+prompts: List[str],
+eval_sampling_params: SamplingParams
+) -> None:
+"""
+Evaluate a language model on a list of prompts,
+compute evaluation metrics, and serialize results to disk.
+"""
+Deliverable: A script to evaluate baseline zero-shot MATH performance.
+
+Answer:
+
+cs336_alignment/math_baseline.py. This script implements the evaluate_vllm method and 
+uses vLLM to load the dataset, format it with r1_zero.prompt, generate responses, 
+and grade them with the provided r1_zero_reward_fn. The generated outputs and rewards 
+are written to disk as JSON lines at zeroshot_qwen_math_eval.jsonl.
+
+
+$ CUDA_VISIBLE_DEVICES=0 uv run math_baseline.py
+INFO 05-03 04:25:48 __init__.py:190] Automatically detected platform cuda.
+Loading data...
+Loading model ../../Qwen/Qwen2.5-0.5B/...
+INFO 05-03 04:25:58 config.py:2382] Downcasting torch.float32 to torch.float16.
+INFO 05-03 04:26:49 config.py:542] This model supports multiple tasks: {'reward', 'embed', 'score', 'classify', 'generate'}. Defaulting to 'generate'.
+INFO 05-03 04:26:49 llm_engine.py:234] Initializing a V0 LLM engine (v0.7.2) with config: model='../../Qwen/Qwen2.5-0.5B/', speculative_config=None, tokenizer='../../Qwen/Qwen2.5-0.5B/', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.float16, max_seq_len=4096, download_dir=None, load_format=LoadFormat.AUTO, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(guided_decoding_backend='xgrammar'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=../../Qwen/Qwen2.5-0.5B/, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=False, chunked_prefill_enabled=False, use_async_output_proc=True, disable_mm_preprocessor_cache=False, mm_processor_kwargs=None, pooler_config=None, compilation_config={"splitting_ops":[],"compile_sizes":[],"cudagraph_capture_sizes":[64,56,48,40,32,24,16,8,4,2,1],"max_capture_size":64}, use_cached_outputs=False,
+INFO 05-03 04:27:02 cuda.py:230] Using Flash Attention backend.
+INFO 05-03 04:27:02 model_runner.py:1110] Starting to load model ../../Qwen/Qwen2.5-0.5B/...
+Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:11<00:00, 11.44s/it]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:11<00:00, 11.44s/it]
+
+INFO 05-03 04:27:15 model_runner.py:1115] Loading model weights took 0.9277 GB
+INFO 05-03 04:27:19 worker.py:267] Memory profiling takes 3.91 seconds
+INFO 05-03 04:27:19 worker.py:267] the current vLLM instance can use total_gpu_memory (5.81GiB) x gpu_memory_utilization (0.90) = 5.23GiB
+INFO 05-03 04:27:19 worker.py:267] model weights take 0.93GiB; non_torch_memory takes 0.03GiB; PyTorch activation peak memory takes 0.47GiB; the rest of the memory reserved for KV Cache is 3.80GiB.
+INFO 05-03 04:27:19 executor_base.py:110] # CUDA blocks: 20767, # CPU blocks: 21845
+INFO 05-03 04:27:19 executor_base.py:115] Maximum concurrency for 4096 tokens per request: 81.12x
+INFO 05-03 04:27:21 model_runner.py:1434] Capturing cudagraphs for decoding. This may lead to unexpected consequences if the model is not static. To run the model in eager mode, set 'enforce_eager=True' or use '--enforce-eager' in the CLI. If out-of-memory error occurs during cudagraph capture, consider decreasing `gpu_memory_utilization` or switching to eager mode. You can also reduce the `max_num_seqs` as needed to decrease memory usage.
+Capturing CUDA graph shapes: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 11/11 [00:06<00:00,  1.66it/s]
+INFO 05-03 04:27:28 model_runner.py:1562] Graph capturing finished in 7 secs, took 0.08 GiB
+INFO 05-03 04:27:28 llm_engine.py:431] init engine (profile, create kv cache, warmup model) took 12.82 seconds
+Generating responses for 12500 prompts...
+Processed prompts: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 12500/12500 [36:50<00:00,  5.65it/s, est. speed input: 937.71 toks/s, output: 3412.47 toks/s]
+WARNING: Error in configuration: macro '\frac' failed its substitution!
+WARNING: Error in configuration: macro '\frac' failed its substitution!
+WARNING: Error in configuration: macro '\frac' failed its substitution!
+WARNING: Error in configuration: macro '\frac' failed its substitution!
+WARNING: Error in configuration: macro '\frac' failed its substitution!
+WARNING: Error in configuration: macro '\frac' failed its substitution!
+WARNING: Error in configuration: macro '\frac' failed its substitution!
+WARNING: Error in configuration: macro '\frac' failed its substitution!
+Serializing results to zeroshot_qwen_math_eval.jsonl...
+Evaluation Complete.
+Average Reward: 0.0408
+Average Format Reward: 0.4607
+Average Answer Reward: 0.0408
+Counts per category:
+Category 1 (Format 1, Answer 1): 510
+Category 2 (Format 1, Answer 0): 5249
+Category 3 (Format 0, Answer 0): 6741
+[rank0]:[W503 05:04:42.013370604 ProcessGroupNCCL.cpp:1250] Warning: WARNING: process group has NOT been destroyed before we destruct ProcessGroupNCCL. On normal program exit, the application should call destroy_process_group to ensure that any pending NCCL operations have finished in this process. In rare cases this process can exit before this point and block the progress of another member of the process group. This constraint has always been present,  but this warning has only been added since PyTorch 2.4 (function operator())
+
+
+
+(b) Run your evaluation script on Qwen2.5-0.5B. How many model generations fall into each
+of the following categories: (1) correct with both format and answer reward 1, (2) format reward
+1 and answer reward 0, (3) format reward 0 and answer reward 0? Observing at least 10 cases
+where format reward is 0, do you think the issue is with the base model’s output, or the parser?
+Why? What about in (at least 10) cases where format reward is 1 but answer reward is 0?
+Deliverable: Commentary on the model and reward function performance, including examples
+of each category.
+
+Answer:
+
+Category 1 (Format 1, Answer 1): 510
+Category 2 (Format 1, Answer 0): 5249
+Category 3 (Format 0, Answer 0): 6741
+
+In cases where the format reward is 0 (Category 3), the issue primarily 
+lies with the base model’s output rather than the parser. 
+As a small 0.5B model evaluated zero-shot, it frequently fails to follow the 
+rigid system instructions. It often omits the required `<think>...</think>` 
+tags for reasoning and the `<answer>...</answer>` tags for the final result, 
+instead generating conversational, unformatted responses that the parser 
+correctly rejects. 
+
+In cases where the format reward is 1 but the answer reward is 0 (Category 2), 
+the model accurately adopts the XML-like schema (the parser perfectly 
+captures the content), but the extracted final answer is mathematically incorrect. 
+This indicates the model struggled with the reasoning and arithmetic complexity 
+of the MATH dataset despite adhering to the requested format.
+
+
+(c) How well does the Qwen2.5-0.5B zero-shot baseline perform on MATH?
+Deliverable: 1-2 sentences with evaluation metrics.
+
+Answer:
+
+Struggles, overall accuracy (average answer reward) 4.08%. 
+While its average format reward reaches 46.07%.
+
+
+
+4.2 SFT Helper Methods
+
+Problem (tokenize_prompt_and_output): Prompt and output tokenization (2 points)
+Deliverable: Implement a method tokenize_prompt_and_output that tokenizes the question and
+output separately, concatenates them together, and constructs a response_mask. The following
+interface is recommended:
+def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer): Tokenize the
+prompt and output strings, and construct a mask that is 1 for the response tokens and 0 for
+other tokens (prompt or padding).
+Args:
+prompt_strs: list[str] List of prompt strings.
+output_strs: list[str] List of output strings.
+tokenizer: PreTrainedTokenizer Tokenizer to use for tokenization.
+Returns:
+dict[str, torch.Tensor]. Let prompt_and_output_lens be a list containing the lengths of
+the tokenized prompt and output strings. Then the returned dictionary should have the
+following keys:
+input_ids torch.Tensor of shape (batch_size, max(prompt_and_output_lens) - 1):
+the tokenized prompt and output strings, with the final token sliced off.
+labels torch.Tensor of shape (batch_size, max(prompt_and_output_lens) - 1):
+shifted input ids, i.e., the input ids without the first token.
+response_mask torch.Tensor of shape (batch_size, max(prompt_and_output_lens) -
+1): a mask on the response tokens in the labels.
+To test your code, implement [adapters.run_tokenize_prompt_and_output]. Then, run the
+test with uv run pytest -k test_tokenize_prompt_and_output and make sure your
+implementation passes it.
+
+Answer:
+
+cs336_alignment/tokenize_prompt_and_output.py
+
+
+Problem (compute_entropy): Per-token entropy (1 point)
+Deliverable: Implement a method compute_entropy that computes the per-token entropy of
+next-token predictions.
+The following interface is recommended:
+def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
+Get the entropy of the next-token predictions (i.e., entropy over the vocabulary dimension).
+Args:
+logits: torch.Tensor Tensor of shape (batch_size, sequence_length, vocab_size)
+containing unnormalized logits.
+Returns:
+torch.Tensor Shape (batch_size, sequence_length). The entropy for each next-token
+prediction.
+Note: you should use a numerically stable method (e.g., using logsumexp) to avoid overflow.
+To test your code, implement [adapters.run_compute_entropy]. Then run uv run pytest
+-k test_compute_entropy and ensure your implementation passes.
+
+Answer:
+
+cs336_alignment/compute_entropy.py
+
+
+Problem (get_response_log_probs): Response log-probs (and entropy) (2 points)
+Deliverable: Implement a method get_response_log_probs that gets per-token conditional
+log-probabilities (given the previous tokens) from a causal language model, and optionally the
+entropy of the model’s next-token distribution.
+The following interface is recommended:
+def get_response_log_probs(
+model: PreTrainedModel,
+input_ids: torch.Tensor,
+labels: torch.Tensor,
+return_token_entropy: bool = False,
+) -> dict[str, torch.Tensor]:
+Args:
+model: PreTrainedModel HuggingFace model used for scoring (placed on the correct device
+and in inference mode if gradients should not be computed).
+input_ids: torch.Tensor shape (batch_size, sequence_length), concatenated prompt +
+response tokens as produced by your tokenization method.
+labels: torch.Tensor shape (batch_size, sequence_length), labels as produced by your
+tokenization method.
+return_token_entropy: bool If True, also return per-token entropy by calling
+compute_entropy.
+Returns:
+dict[str, torch.Tensor].
+"log_probs" shape (batch_size, sequence_length), conditional log-probabilities
+log pθ(xt |x<t).
+"token_entropy" optional, shape (batch_size, sequence_length), per-token entropy
+for each position (present only if return_token_entropy=True).
+Implementation tips:
+• Obtain logits with model(input_ids).logits.
+To test your code, implement [adapters.run_get_response_log_probs]. Then run uv run
+pytest -k test_get_response_log_probs and ensure the test passes
+
+Answer:
+
+cs336_alignment/get_response_log_probs.py
+
+
+
+SFT microbatch train step
+
+Problem (masked_normalize): Masked normalize (1 point)
+Deliverable: Implement a method masked_normalize that sums over tensor elements and
+normalizes by a constant while respecting a boolean mask.
+The following interface is recommended:
+def masked_normalize(
+tensor: torch.Tensor,
+mask: torch.Tensor,
+normalize_constant: float,
+dim: int | None = None,
+) -> torch.Tensor:
+Sum over a dimension and normalize by a constant, considering only those elements where mask
+== 1.
+Args:
+tensor: torch.Tensor The tensor to sum and normalize.
+mask: torch.Tensor Same shape as tensor; positions with 1 are included in the sum.
+normalize_constant: float the constant to divide by for normalization.
+dim: int | None the dimension to sum along before normalization. If None, sum over all
+dimensions.
+Returns:
+torch.Tensor the normalized sum, where masked elements (mask == 0) don’t contribute to
+the sum.
+To test your code, implement [adapters.run_masked_normalize]. Then run uv run pytest
+-k test_masked_normalize and ensure it passes.
