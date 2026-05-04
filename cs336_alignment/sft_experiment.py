@@ -315,6 +315,7 @@ def evaluate_math_vllm(
 def _wandb_init(args: argparse.Namespace, extra_config: dict[str, Any]) -> Any:
     """Start a W&B run and bind custom x-axes (explicit metric names; globs are unreliable)."""
     import wandb
+    import wandb.errors
 
     cfg = {**vars(args), **extra_config}
     entity = args.wandb_entity or os.environ.get("WANDB_ENTITY")
@@ -322,11 +323,26 @@ def _wandb_init(args: argparse.Namespace, extra_config: dict[str, Any]) -> Any:
         "project": args.wandb_project,
         "name": args.wandb_run_name,
         "config": cfg,
+        "settings": wandb.Settings(
+            init_timeout=args.wandb_init_timeout,
+        ),
     }
     if entity:
         init_kw["entity"] = entity
 
-    run = wandb.init(**init_kw)
+    _emit(f"Weights & Biases: init_timeout={args.wandb_init_timeout}s (WANDB fallback={args.wandb_offline_on_comm_error})")
+    try:
+        run = wandb.init(**init_kw)
+    except wandb.errors.CommError as e:
+        if not args.wandb_offline_on_comm_error:
+            raise
+        _emit(
+            f"Weights & Biases: online init failed ({type(e).__name__}: {e}); "
+            "retrying with mode='offline' (train continues; sync later via `wandb sync`)."
+        )
+        init_kw_retry = dict(init_kw)
+        init_kw_retry["settings"] = wandb.Settings(init_timeout=max(args.wandb_init_timeout, 120), mode="offline")
+        run = wandb.init(**init_kw_retry)
     if run is None:
         raise RuntimeError("wandb.init() returned None (check WANDB credentials / project access).")
 
@@ -345,7 +361,7 @@ def _wandb_init(args: argparse.Namespace, extra_config: dict[str, Any]) -> Any:
         wandb.define_metric(name, step_metric="eval_step")
 
     mode = os.environ.get("WANDB_MODE", "online")
-    _emit(f"Weights & Biases mode: {mode}")
+    _emit(f"Weights & Biases mode (WANDB_MODE env): {mode}")
     url = getattr(run, "url", None)
     if url:
         _emit(f"Weights & Biases run URL: {url}")
@@ -803,6 +819,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="W&B entity (user or team). Default: WANDB_ENTITY env or `wandb login` default.",
+    )
+    env_wandb_timeout = os.environ.get("WANDB_INIT_TIMEOUT")
+    wandb_timeout_default = 600.0
+    if env_wandb_timeout is not None:
+        try:
+            wandb_timeout_default = float(env_wandb_timeout)
+        except ValueError:
+            pass
+    p.add_argument(
+        "--wandb_init_timeout",
+        type=float,
+        default=wandb_timeout_default,
+        help=(
+            "Seconds to wait during wandb.init (slow cluster networks may need larger values). "
+            "Default from WANDB_INIT_TIMEOUT env or 600. "
+            "Equivalent to wandb.Settings(init_timeout=...)."
+        ),
+    )
+    p.add_argument(
+        "--wandb_offline_on_comm_error",
+        dest="wandb_offline_on_comm_error",
+        action="store_true",
+        default=os.environ.get("WANDB_OFFLINE_ON_COMM_ERROR", "").lower()
+        not in {"0", "false", "no"},
+        help=(
+            "If online init hits CommError/timeout, retry in offline mode so training proceeds. "
+            "Disable with env WANDB_OFFLINE_ON_COMM_ERROR=0."
+        ),
+    )
+    p.add_argument(
+        "--wandb_strict_online",
+        dest="wandb_offline_on_comm_error",
+        action="store_false",
+        help="Do not fall back to offline on init failure (fail immediately).",
     )
     p.add_argument("--save_model_dir", type=str, default=None)
     p.add_argument(
