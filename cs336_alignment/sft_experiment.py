@@ -44,6 +44,22 @@ def _emit(msg: str) -> None:
     print(msg, flush=True)
 
 
+def _next_terminal_step(counter: list[int], msg: str) -> None:
+    """Monotonic step label for the terminal (one counter for setup + training)."""
+    counter[0] += 1
+    _emit(f"[step {counter[0]}] {msg}")
+
+
+def _next_terminal_step_tqdm_safe(counter: list[int], msg: str, *, use_tqdm_write: bool) -> None:
+    """Like ``_next_terminal_step`` but uses ``tqdm.write`` when a tqdm bar is active (avoids garbled bars)."""
+    counter[0] += 1
+    line = f"[step {counter[0]}] {msg}"
+    if use_tqdm_write:
+        tqdm.write(line)
+    else:
+        _emit(line)
+
+
 def init_vllm(
     model_id: str,
     device: str,
@@ -237,18 +253,23 @@ def _wandb_init(args: argparse.Namespace, extra_config: dict[str, Any]) -> Any:
 
 
 def train(args: argparse.Namespace) -> None:
-    _emit("sft_experiment: starting (loading data; model and W&B init come next)…")
+    step_log: list[int] = [0]
+    _next_terminal_step(step_log, "starting — policy device, seeds, optional HF_HOME")
     device = torch.device(args.policy_device)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
     if args.hf_home:
         os.environ.setdefault("HF_HOME", str(Path(args.hf_home).expanduser().resolve()))
+        _next_terminal_step(step_log, f"HF_HOME set to {args.hf_home}")
+    else:
+        _next_terminal_step(step_log, "HF_HOME unchanged (no --hf_home)")
 
-    _emit(f"Loading SFT JSON: {args.sft_json}")
+    _next_terminal_step(step_log, f"reading prompt template: {args.prompt_template_path}")
     template = Path(args.prompt_template_path).read_text(encoding="utf-8")
+    _next_terminal_step(step_log, f"loading SFT JSON: {args.sft_json}")
     records = load_sft_records(Path(args.sft_json))
-    _emit(f"Loaded {len(records)} raw records from SFT file")
+    _next_terminal_step(step_log, f"loaded {len(records)} raw SFT records")
     n_raw = len(records)
     if args.filtered_only:
         filt: list[dict[str, Any]] = []
@@ -260,10 +281,21 @@ def train(args: argparse.Namespace) -> None:
             if grade(str(ext).strip(), str(exp).strip(), fast=True):
                 filt.append(ex)
         records = filt
-        _emit(f"Filtered to {len(records)} / {n_raw} examples with graded-correct extracted answers.")
+        _next_terminal_step(
+            step_log,
+            f"filtered to {len(records)} / {n_raw} rows (graded-correct extracted answers)",
+        )
+    else:
+        _next_terminal_step(step_log, "not using --filtered_only (no answer-based filter)")
 
     if args.max_train_examples is not None:
         records = records[: args.max_train_examples]
+        _next_terminal_step(
+            step_log,
+            f"capped training records to max_train_examples={args.max_train_examples}",
+        )
+    else:
+        _next_terminal_step(step_log, "no max_train_examples cap (using all parsed records)")
 
     prompts = []
     responses = []
@@ -282,10 +314,17 @@ def train(args: argparse.Namespace) -> None:
     if not prompts:
         raise RuntimeError("No training examples after parsing; check JSON fields (problem, reasoning_trace).")
 
+    _next_terminal_step(step_log, f"built {len(prompts)} supervised prompt/response pairs for training")
     train_ds = SFTStringDataset(prompts, responses)
+    _next_terminal_step(
+        step_log,
+        f"loading validation pairs from {Path(args.val_json).expanduser().resolve()}",
+    )
     eval_problems, eval_ground_truths = load_val_eval_pairs(Path(args.val_json).expanduser().resolve())
+    _next_terminal_step(step_log, f"loaded {len(eval_problems)} validation problems with expected answers")
 
     # W&B before model load so runs appear immediately and failures still create a partial run.
+    _next_terminal_step(step_log, "initializing Weights & Biases")
     wandb_run = _wandb_init(
         args,
         {
@@ -295,12 +334,18 @@ def train(args: argparse.Namespace) -> None:
             "sft_json_resolved": str(Path(args.sft_json).expanduser().resolve()),
         },
     )
+    _next_terminal_step(step_log, "Weights & Biases run ready (see messages above for mode / URL)")
 
-    _emit("Loading tokenizer and policy model (this can take several minutes on first run)…")
+    _next_terminal_step(
+        step_log,
+        f"loading tokenizer from {args.model_path} (first run may download; can take minutes)",
+    )
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
+    _next_terminal_step(step_log, "tokenizer ready (pad token aligned with EOS if needed)")
 
+    _next_terminal_step(step_log, f"loading policy weights from {args.model_path} in bfloat16")
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path,
         trust_remote_code=True,
@@ -308,8 +353,13 @@ def train(args: argparse.Namespace) -> None:
     )
     model.to(device)
     model.train()
+    _next_terminal_step(step_log, f"policy on {device} in train mode")
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    _next_terminal_step(
+        step_log,
+        f"optimizer: AdamW (lr={args.learning_rate}, weight_decay={args.weight_decay})",
+    )
 
     _emit("--- SFT configuration ---")
     _emit(f"  train examples: {len(train_ds)}")
@@ -321,7 +371,11 @@ def train(args: argparse.Namespace) -> None:
 
     llm: LLM | None = None
     if not args.skip_vllm_eval:
-        _emit(f"Starting vLLM on {args.vllm_device} …")
+        _next_terminal_step(
+            step_log,
+            f"starting vLLM on {args.vllm_device} (gpu_mem={args.vllm_gpu_memory}, "
+            f"max_model_len={args.vllm_max_model_len}, max_num_seqs={args.vllm_max_num_seqs})",
+        )
         llm = init_vllm(
             args.model_path,
             device=args.vllm_device,
@@ -330,6 +384,9 @@ def train(args: argparse.Namespace) -> None:
             max_model_len=args.vllm_max_model_len,
             max_num_seqs=args.vllm_max_num_seqs,
         )
+        _next_terminal_step(step_log, "vLLM engine initialized")
+    else:
+        _next_terminal_step(step_log, "skipping vLLM (--skip_vllm_eval); validation during training disabled")
 
     train_step = 0
     eval_step = 0
@@ -338,6 +395,10 @@ def train(args: argparse.Namespace) -> None:
         nonlocal eval_step
         if llm is None:
             return float("nan")
+        _next_terminal_step(
+            step_log,
+            f"eval:{tag} — sync policy to vLLM, generate on {len(eval_problems)} val items",
+        )
         model.eval()
         load_policy_into_vllm_instance(model, llm)
         metrics = evaluate_math_vllm(
@@ -374,7 +435,13 @@ def train(args: argparse.Namespace) -> None:
         run_eval("init")
 
     n_microbatches = max(1, math.ceil(len(train_ds) / args.train_microbatch_size))
+    use_tqdm_write_for_train = not args.no_progress_bar
     for epoch in range(args.epochs):
+        _next_terminal_step(
+            step_log,
+            f"epoch {epoch + 1}/{args.epochs} — {n_microbatches} microbatches "
+            f"(size={args.train_microbatch_size}, grad_accum={args.gradient_accumulation_steps})",
+        )
         batches = iterate_batches(train_ds, args.train_microbatch_size, shuffle=True, seed=args.seed + epoch)
         accum = 0
         opt.zero_grad(set_to_none=True)
@@ -436,6 +503,12 @@ def train(args: argparse.Namespace) -> None:
                     loss=f"{loss_v:.4f}",
                     rtok=int(rtok),
                 )
+                _next_terminal_step_tqdm_safe(
+                    step_log,
+                    f"optimizer step {train_step} (epoch {epoch + 1}/{args.epochs}) — "
+                    f"loss={loss_v:.6f} masked_nll_sum={msum:.4f} response_tokens={int(rtok)}",
+                    use_tqdm_write=use_tqdm_write_for_train,
+                )
                 if llm is not None and train_step % args.eval_every_train_steps == 0:
                     run_eval(f"epoch{epoch}_step{train_step}")
 
@@ -457,20 +530,45 @@ def train(args: argparse.Namespace) -> None:
                 )
             if not args.no_progress_bar:
                 pbar.set_postfix(opt_step=train_step, loss="tail", rtok="—")
+            if (
+                last_loss_v is not None
+                and last_msum is not None
+                and last_rtok is not None
+            ):
+                _next_terminal_step_tqdm_safe(
+                    step_log,
+                    f"optimizer step {train_step} (epoch {epoch + 1}/{args.epochs}, tail batch) — "
+                    f"loss={last_loss_v:.6f} masked_nll_sum={last_msum:.4f} response_tokens={int(last_rtok)}",
+                    use_tqdm_write=use_tqdm_write_for_train,
+                )
+            else:
+                _next_terminal_step_tqdm_safe(
+                    step_log,
+                    f"optimizer step {train_step} (epoch {epoch + 1}/{args.epochs}, tail batch) — "
+                    "no loss stats (skipped microbatch loop?)",
+                    use_tqdm_write=use_tqdm_write_for_train,
+                )
             if llm is not None and train_step % args.eval_every_train_steps == 0:
                 run_eval(f"epoch{epoch}_step{train_step}_tail")
 
+    _next_terminal_step(step_log, "all training epochs complete")
     final_acc = float("nan")
     if llm is not None:
         final_acc = run_eval("final")
+    else:
+        _next_terminal_step(step_log, "skipping final eval (no vLLM)")
 
     if args.save_model_dir:
         out_dir = Path(args.save_model_dir)
+        _next_terminal_step(step_log, f"saving policy and tokenizer to {out_dir}")
         out_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(out_dir)
         tokenizer.save_pretrained(out_dir)
-        _emit(f"Saved model and tokenizer to {out_dir}")
+        _next_terminal_step(step_log, f"saved model and tokenizer to {out_dir}")
+    else:
+        _next_terminal_step(step_log, "no --save_model_dir; skipping checkpoint write")
 
+    _next_terminal_step(step_log, "run finished — summary below")
     _emit("--- Run finished ---")
     if final_acc == final_acc:  # not NaN
         _emit(f"  final validation accuracy: {final_acc:.6f} ({100.0 * final_acc:.2f}%)")
@@ -480,6 +578,7 @@ def train(args: argparse.Namespace) -> None:
     url = getattr(wandb_run, "url", None)
     if url:
         _emit(f"  W&B URL: {url}")
+    _next_terminal_step(step_log, "closing Weights & Biases run")
     wandb_run.finish()
 
 
@@ -563,7 +662,10 @@ def main() -> None:
         print("ERROR: the `wandb` package is required. Install with: uv pip install wandb", flush=True)
         sys.exit(1)
     del _wandb_check
-    print(f"sft_experiment: parsed args (project={args.wandb_project!r}, run={args.wandb_run_name!r})", flush=True)
+    _emit(
+        f"sft_experiment: parsed CLI (project={args.wandb_project!r}, run={args.wandb_run_name!r}) — "
+        "entering train()",
+    )
     train(args)
 
 
