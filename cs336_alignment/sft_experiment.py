@@ -620,10 +620,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--wandb_project",
         type=str,
-        default=os.environ.get("WANDB_PROJECT", "ece405-sft"),
+        default=os.environ.get("WANDB_PROJECT", "ece405-assignment-3"),
         help=(
             "Weights & Biases project name. "
-            "Default: value of WANDB_PROJECT if set, otherwise 'ece405-sft'. "
+            "Default: value of WANDB_PROJECT if set, otherwise 'ece405-assignment-3'. "
             "Log in with `wandb login` or set WANDB_API_KEY."
         ),
     )
