@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -26,6 +27,7 @@ from typing import Any, Iterator
 from unittest.mock import patch
 
 import torch
+from tqdm import tqdm
 from torch import nn
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
@@ -154,12 +156,26 @@ def evaluate_math_vllm(
     ground_truths: list[str],
     max_gen_tokens: int,
     eval_batch_size: int,
+    *,
+    show_progress: bool = True,
+    desc: str = "validation",
 ) -> dict[str, float]:
     prompts = [build_prompt(p, prompt_template) for p in problems]
     params = SamplingParams(temperature=0.0, max_tokens=max_gen_tokens)
     correct = 0
     total = 0
-    for start in range(0, len(prompts), eval_batch_size):
+    n_batches = max(1, math.ceil(len(prompts) / eval_batch_size))
+    starts = range(0, len(prompts), eval_batch_size)
+    batch_iter = tqdm(
+        starts,
+        total=n_batches,
+        desc=desc,
+        unit="batch",
+        leave=False,
+        disable=not show_progress,
+        dynamic_ncols=True,
+    )
+    for start in batch_iter:
         batch_p = prompts[start : start + eval_batch_size]
         batch_gt = ground_truths[start : start + eval_batch_size]
         outputs = llm.generate(batch_p, params)
@@ -169,6 +185,9 @@ def evaluate_math_vllm(
             total += 1
             if rew.get("answer_reward", 0.0) >= 1.0:
                 correct += 1
+        if show_progress and total:
+            acc_so_far = correct / total
+            batch_iter.set_postfix(acc=f"{100.0 * acc_so_far:.1f}%", ok=f"{correct}/{total}")
     return {"accuracy": correct / max(total, 1), "n": float(total)}
 
 
@@ -295,6 +314,8 @@ def train(args: argparse.Namespace) -> None:
             eval_ground_truths,
             max_gen_tokens=args.eval_max_tokens,
             eval_batch_size=args.eval_batch_size,
+            show_progress=not args.no_progress_bar,
+            desc=f"eval:{tag}",
         )
         acc = metrics["accuracy"]
         n_ev = int(metrics["n"])
@@ -318,11 +339,21 @@ def train(args: argparse.Namespace) -> None:
     if llm is not None:
         run_eval("init")
 
+    n_microbatches = max(1, math.ceil(len(train_ds) / args.train_microbatch_size))
     for epoch in range(args.epochs):
         batches = iterate_batches(train_ds, args.train_microbatch_size, shuffle=True, seed=args.seed + epoch)
         accum = 0
         opt.zero_grad(set_to_none=True)
-        for batch in batches:
+        pbar = tqdm(
+            batches,
+            total=n_microbatches,
+            desc=f"SFT train epoch {epoch + 1}/{args.epochs}",
+            unit="microbatch",
+            leave=True,
+            disable=args.no_progress_bar,
+            dynamic_ncols=True,
+        )
+        for batch in pbar:
             tok_batch = tokenize_prompt_and_output(
                 batch["prompt"],
                 batch["response"],
@@ -359,9 +390,10 @@ def train(args: argparse.Namespace) -> None:
                         "train/epoch": epoch,
                     }
                 )
-                _emit(
-                    f"[train] step={train_step}  epoch={epoch}  loss={loss_v:.6f}  "
-                    f"masked_nll_sum={msum:.2f}  response_tokens={rtok:.0f}"
+                pbar.set_postfix(
+                    opt_step=train_step,
+                    loss=f"{loss_v:.4f}",
+                    rtok=int(rtok),
                 )
                 if llm is not None and train_step % args.eval_every_train_steps == 0:
                     run_eval(f"epoch{epoch}_step{train_step}")
@@ -371,6 +403,8 @@ def train(args: argparse.Namespace) -> None:
             opt.step()
             opt.zero_grad(set_to_none=True)
             train_step += 1
+            if not args.no_progress_bar:
+                pbar.set_postfix(opt_step=train_step, loss="tail", rtok="—")
             if llm is not None and train_step % args.eval_every_train_steps == 0:
                 run_eval(f"epoch{epoch}_step{train_step}_tail")
 
@@ -430,6 +464,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--vllm_max_model_len", type=int, default=8192)
     p.add_argument("--vllm_max_num_seqs", type=int, default=64)
     p.add_argument("--skip_vllm_eval", action="store_true", help="Train only (single GPU / no vLLM).")
+    p.add_argument(
+        "--no_progress_bar",
+        action="store_true",
+        help="Disable tqdm progress bars (plain logs for CI or non-TTY).",
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--wandb_project",
