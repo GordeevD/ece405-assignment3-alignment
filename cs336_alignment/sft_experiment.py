@@ -284,13 +284,22 @@ def build_prompt(problem: str, template: str) -> str:
     return template.replace("{question}", problem)
 
 
-def load_val_eval_pairs(val_path: Path) -> tuple[list[str], list[str]]:
+def load_val_eval_pairs(
+    val_path: Path,
+    *,
+    progress_cb: Callable[[str], None] | None = None,
+    progress_every: int = 500,
+) -> tuple[list[str], list[str]]:
     """Load validation problems and ground-truth answers from ``sft_val.jsonl``-style JSON.
 
     Each record must include ``problem`` and ``expected_answer`` (same schema as
     ``cs336_alignment/sft_val.jsonl``).
     """
-    records = load_sft_records(val_path)
+    records = load_sft_records(
+        val_path,
+        progress_cb=progress_cb,
+        progress_every=progress_every,
+    )
     problems: list[str] = []
     ground_truths: list[str] = []
     for ex in records:
@@ -528,7 +537,10 @@ def train(args: argparse.Namespace) -> None:
         step_log,
         f"loading validation pairs from {Path(args.val_json).expanduser().resolve()}",
     )
-    eval_problems, eval_ground_truths = load_val_eval_pairs(Path(args.val_json).expanduser().resolve())
+    eval_problems, eval_ground_truths = load_val_eval_pairs(
+        Path(args.val_json).expanduser().resolve(),
+        progress_cb=_emit,
+    )
     _next_terminal_step(step_log, f"loaded {len(eval_problems)} validation problems with expected answers")
 
     # W&B before model load so runs appear immediately and failures still create a partial run.
