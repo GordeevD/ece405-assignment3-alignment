@@ -53,6 +53,22 @@ def _emit(msg: str) -> None:
     print(msg, flush=True)
 
 
+def _check_system_resources(label: str = "") -> None:
+    """Log current system resource usage."""
+    try:
+        import psutil
+        process = psutil.Process()
+        mem_info = process.memory_info()
+        mem_percent = process.memory_percent()
+        cpu_percent = process.cpu_percent(interval=0.1)
+        label_str = f" [{label}]" if label else ""
+        _emit(f"RESOURCES{label_str}: Memory={mem_info.rss / (1024**3):.1f}GB ({mem_percent:.1f}%), CPU={cpu_percent:.1f}%")
+    except ImportError:
+        pass  # psutil not available
+    except Exception as e:
+        pass  # silently skip if monitoring fails
+
+
 def _next_terminal_step(counter: list[int], msg: str) -> None:
     """Monotonic step label for the terminal (one counter for setup + training)."""
     counter[0] += 1
@@ -490,6 +506,17 @@ def train(args: argparse.Namespace) -> None:
     # ==============================================
     # PHASE 1: INITIALIZATION & DEVICE SETUP
     # ==============================================
+    
+    # Add signal handlers to catch premature termination
+    def signal_handler(signum, frame):
+        _emit(f"\n\nERROR: Received signal {signum} ({signal.Signals(signum).name}) - process terminating")
+        _emit(f"Last phase: Check output above for where execution stopped")
+        sys.exit(1)
+    
+    import signal
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
     _emit("[PHASE 1] Initialization & Device Setup")
     step_log: list[int] = [0]
     _next_terminal_step(step_log, "starting — policy device, seeds, optional HF_HOME")
@@ -611,23 +638,69 @@ def train(args: argparse.Namespace) -> None:
     # PHASE 3: MODEL & TOKENIZER LOADING
     # ==============================================
     _emit("[PHASE 3] Model & Tokenizer Loading")
+    
+    model_path = Path(args.model_path).expanduser().resolve()
+    _emit(f"DEBUG: Model path: {model_path}")
+    _emit(f"DEBUG: Model path exists: {model_path.exists()}")
+    if model_path.exists():
+        _emit(f"DEBUG: Model path is directory: {model_path.is_dir()}")
+        if model_path.is_dir():
+            _emit(f"DEBUG: Model directory contents: {list(model_path.glob('*'))[:5]}...")
+    
+    # Check Hugging Face environment
+    hf_home = os.environ.get("HF_HOME")
+    _emit(f"DEBUG: HF_HOME env: {hf_home}")
+    if hf_home:
+        hf_cache = Path(hf_home) / "hub"
+        _emit(f"DEBUG: HF cache dir: {hf_cache}")
+        _emit(f"DEBUG: HF cache dir exists: {hf_cache.exists()}")
+    
     _next_terminal_step(
         step_log,
         f"loading tokenizer from {args.model_path} (first run may download; can take minutes)",
     )
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    _emit(f"DEBUG: Starting tokenizer load at {datetime.now().isoformat()}...")
+    _check_system_resources("before-tokenizer")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+        _emit(f"DEBUG: Tokenizer loaded successfully at {datetime.now().isoformat()}")
+        _check_system_resources("after-tokenizer")
+    except Exception as e:
+        _emit(f"ERROR: Failed to load tokenizer: {type(e).__name__}: {e}")
+        _check_system_resources("error-tokenizer")
+        _emit("Stack trace:")
+        import traceback
+        _emit(traceback.format_exc())
+        raise
+    
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     _next_terminal_step(step_log, "tokenizer ready (pad token aligned with EOS if needed)")
 
     _next_terminal_step(step_log, f"loading policy weights from {args.model_path} in bfloat16")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
-    )
+    _emit(f"DEBUG: Starting model load at {datetime.now().isoformat()}...")
+    _check_system_resources("before-model")
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_path,
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16,
+        )
+        _emit(f"DEBUG: Model loaded successfully at {datetime.now().isoformat()}")
+        _check_system_resources("after-model")
+    except Exception as e:
+        _emit(f"ERROR: Failed to load model: {type(e).__name__}: {e}")
+        _check_system_resources("error-model")
+        _emit("Stack trace:")
+        import traceback
+        _emit(traceback.format_exc())
+        raise
+    
+    _emit(f"DEBUG: Moving model to device {device}...")
+    _check_system_resources("before-move-to-device")
     model.to(device)
     model.train()
+    _check_system_resources("after-move-to-device")
     _next_terminal_step(step_log, f"policy on {device} in train mode")
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
