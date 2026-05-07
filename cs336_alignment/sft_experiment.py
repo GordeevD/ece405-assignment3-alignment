@@ -461,6 +461,7 @@ def train(args: argparse.Namespace) -> None:
     # ==============================================
     # PHASE 1: INITIALIZATION & DEVICE SETUP
     # ==============================================
+    _emit("[PHASE 1] Initialization & Device Setup")
     step_log: list[int] = [0]
     _next_terminal_step(step_log, "starting — policy device, seeds, optional HF_HOME")
     device = torch.device(args.policy_device)
@@ -476,6 +477,7 @@ def train(args: argparse.Namespace) -> None:
     # ==============================================
     # PHASE 2: DATA LOADING
     # ==============================================
+    _emit("[PHASE 2] Data Loading (SFT records, validation pairs)")
     _next_terminal_step(step_log, f"reading prompt template: {args.prompt_template_path}")
     template = Path(args.prompt_template_path).read_text(encoding="utf-8")
     _next_terminal_step(step_log, f"loading SFT JSON: {args.sft_json}")
@@ -562,6 +564,7 @@ def train(args: argparse.Namespace) -> None:
     # ==============================================
     # PHASE 3: MODEL & TOKENIZER LOADING
     # ==============================================
+    _emit("[PHASE 3] Model & Tokenizer Loading")
     _next_terminal_step(
         step_log,
         f"loading tokenizer from {args.model_path} (first run may download; can take minutes)",
@@ -602,6 +605,7 @@ def train(args: argparse.Namespace) -> None:
     # ==============================================
     # PHASE 4: OPTIONAL vLLM ENGINE INITIALIZATION
     # ==============================================
+    _emit("[PHASE 4] vLLM Engine Initialization")
     llm: LLM | None = None
     # Initialize vLLM engine on separate GPU (or skip for single-GPU training)
     if not args.skip_vllm_eval:
@@ -627,6 +631,7 @@ def train(args: argparse.Namespace) -> None:
     # Deferred until after all setup complete (tokenizer, model, optimizer, vLLM)
     # This prevents timeout issues by connecting only when ready to train.
     # ==============================================
+    _emit("[PHASE 5] Weights & Biases Initialization (deferred until setup complete)")
     _next_terminal_step(step_log, "initializing Weights & Biases")
     wandb_run = _wandb_init(
         args,
@@ -645,6 +650,7 @@ def train(args: argparse.Namespace) -> None:
     # ==============================================
     # PHASE 6: OPTIONAL PRE-TRAINING VALIDATION
     # ==============================================
+    _emit("[PHASE 6] Optional Pre-Training Validation")
     def run_eval(tag: str) -> float:
         nonlocal eval_step
         if llm is None:
@@ -695,6 +701,7 @@ def train(args: argparse.Namespace) -> None:
     # ==============================================
     # PHASE 7: MAIN TRAINING LOOP
     # ==============================================
+    _emit("[PHASE 7] Main Training Loop (epochs with gradient accumulation & periodic evaluation)")
     n_microbatches = max(1, math.ceil(len(train_ds) / args.train_microbatch_size))
     use_tqdm_write_for_train = not args.no_progress_bar
 
@@ -845,6 +852,7 @@ def train(args: argparse.Namespace) -> None:
     # ==============================================
     # PHASE 8: POST-TRAINING EVALUATION & CLEANUP
     # ==============================================
+    _emit("[PHASE 8] Post-Training Evaluation & Cleanup")
     _next_terminal_step(step_log, "all training epochs complete")
     final_acc = float("nan")
     final_n_eval: int | None = None
@@ -871,6 +879,7 @@ def train(args: argparse.Namespace) -> None:
     # ==============================================
     # PHASE 9: RESULTS LOGGING & FINALIZATION
     # ==============================================
+    _emit("[PHASE 9] Results Logging & Finalization")
     _next_terminal_step(step_log, "run finished — summary below")
     _emit("--- Run finished ---")
     if final_acc == final_acc:  # not NaN
