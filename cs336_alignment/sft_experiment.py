@@ -37,7 +37,11 @@ from torch import nn
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
 from vllm import LLM, SamplingParams
-from vllm.model_executor import set_random_seed as vllm_set_random_seed
+
+try:
+    from vllm.model_executor import set_random_seed as vllm_set_random_seed
+except ImportError:  # newer vLLM (e.g. Metal builds): moved to torch_utils
+    from vllm.utils.torch_utils import set_random_seed as vllm_set_random_seed
 
 from cs336_alignment.drgrpo_grader import grade, r1_zero_reward_fn
 from cs336_alignment.get_response_log_probs import get_response_log_probs
@@ -123,47 +127,48 @@ def _load_json_array_streaming(
     """
     decoder = json.JSONDecoder()
     buf = ""
+    idx = 0
     chunk_size = 4 * 1024 * 1024
+    compact_threshold = 1 * 1024 * 1024
     out: list[dict[str, Any]] = []
     n_items = 0
     started_at = time.time()
     bytes_read = 0
     ended_with_bracket = False
+    reached_eof = False
+
+    def _skip_ws() -> None:
+        nonlocal idx
+        while idx < len(buf) and buf[idx].isspace():
+            idx += 1
 
     def refill() -> bool:
-        nonlocal buf, bytes_read
+        nonlocal buf, idx, bytes_read, reached_eof
+        if idx >= compact_threshold:
+            buf = buf[idx:]
+            idx = 0
         chunk = f.read(chunk_size)
         if chunk:
             bytes_read += len(chunk)
             buf += chunk
             return True
+        reached_eof = True
         return False
 
     while True:
-        buf = buf.lstrip()
-        if not buf:
+        _skip_ws()
+        if idx >= len(buf):
             if not refill():
                 break
             continue
 
-        if buf[0] == "]":
-            buf = buf[1:]
-            ended_with_bracket = True
-            break
-
-        pos = 0
-        while pos < len(buf) and buf[pos].isspace():
-            pos += 1
-        if pos >= len(buf):
-            buf = ""
-            continue
-        if buf[pos] == "]":
-            buf = buf[pos + 1 :]
+        if buf[idx] == "]":
+            idx += 1
             ended_with_bracket = True
             break
 
         try:
-            obj, end = decoder.raw_decode(buf, pos)
+            obj, end = decoder.raw_decode(buf, idx)
         except json.JSONDecodeError:
             if not refill():
                 raise ValueError(f"Incomplete or invalid JSON array near entry {n_items + 1} in {path}") from None
@@ -173,6 +178,7 @@ def _load_json_array_streaming(
             raise ValueError(f"Expected object entries in JSON array: {path}")
         out.append(obj)
         n_items += 1
+        idx = end
         if progress_cb is not None and n_items % progress_every == 0:
             elapsed = max(time.time() - started_at, 1e-9)
             mib = bytes_read / (1024 * 1024)  # UTF-8 chars ≈ bytes for ASCII-heavy JSON
@@ -180,9 +186,10 @@ def _load_json_array_streaming(
                 f"parsed {n_items} JSON array rows ({n_items / elapsed:.1f} rows/s, ~{mib:.1f} MiB read)"
             )
 
-        buf = buf[end:].lstrip()
-        if buf.startswith(","):
-            buf = buf[1:]
+        _skip_ws()
+        if idx < len(buf) and buf[idx] == ",":
+            idx += 1
+
         if max_records is not None and n_items >= max_records:
             if progress_cb is not None:
                 elapsed = max(time.time() - started_at, 1e-9)
@@ -196,11 +203,14 @@ def _load_json_array_streaming(
         raise ValueError(f"JSON array in {path} ended before closing ']' (incomplete file or truncated JSON)")
 
     if max_records is None:
-        buf = buf.lstrip()
-        while buf or refill():
-            buf = buf.lstrip()
-            if buf:
-                raise ValueError(f"Trailing content after JSON array in {path}: {buf[:120]!r}")
+        while True:
+            _skip_ws()
+            if idx < len(buf):
+                raise ValueError(f"Trailing content after JSON array in {path}: {buf[idx:idx + 120]!r}")
+            if reached_eof:
+                break
+            if not refill():
+                break
 
     if progress_cb is not None:
         elapsed = max(time.time() - started_at, 1e-9)
