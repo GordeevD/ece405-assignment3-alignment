@@ -133,6 +133,8 @@ def _load_json_array_streaming(
     out: list[dict[str, Any]] = []
     n_items = 0
     started_at = time.time()
+    last_progress_at = started_at
+    progress_timeout = 60  # seconds without progress before warning
     bytes_read = 0
     ended_with_bracket = False
     reached_eof = False
@@ -203,14 +205,25 @@ def _load_json_array_streaming(
         raise ValueError(f"JSON array in {path} ended before closing ']' (incomplete file or truncated JSON)")
 
     if max_records is None:
-        while True:
+        # Verify no trailing content after the closing bracket
+        _skip_ws()
+        if idx < len(buf):
+            raise ValueError(f"Trailing content after JSON array in {path}: {buf[idx:idx + 120]!r}")
+        
+        # Continue checking for trailing content if we haven't reached EOF yet
+        attempts = 0
+        max_attempts = 100  # ~100 chunks = ~400MB max verification
+        while not reached_eof and attempts < max_attempts:
+            if not refill():
+                break
+            attempts += 1
             _skip_ws()
             if idx < len(buf):
                 raise ValueError(f"Trailing content after JSON array in {path}: {buf[idx:idx + 120]!r}")
-            if reached_eof:
-                break
-            if not refill():
-                break
+        
+        if attempts >= max_attempts and not reached_eof:
+            if progress_cb is not None:
+                progress_cb(f"WARNING: JSON verification stopped after {attempts} chunks (possible very large file or infinite stream)")
 
     if progress_cb is not None:
         elapsed = max(time.time() - started_at, 1e-9)
@@ -228,6 +241,16 @@ def load_sft_records(
     path = path.expanduser().resolve()
     if progress_cb is not None:
         progress_cb(f"reading records from {path}")
+
+    # Check if file exists and is readable
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    if not path.is_file():
+        raise ValueError(f"Path is not a file: {path}")
+
+    file_size = path.stat().st_size
+    if progress_cb is not None:
+        progress_cb(f"file size: {file_size / (1024*1024):.1f} MiB")
 
     with path.open("r", encoding="utf-8") as f:
         first_non_ws: str | None = None
@@ -305,11 +328,17 @@ def load_val_eval_pairs(
     Each record must include ``problem`` and ``expected_answer`` (same schema as
     ``cs336_alignment/sft_val.jsonl``).
     """
-    records = load_sft_records(
-        val_path,
-        progress_cb=progress_cb,
-        progress_every=progress_every,
-    )
+    try:
+        records = load_sft_records(
+            val_path,
+            progress_cb=progress_cb,
+            progress_every=progress_every,
+        )
+    except Exception as e:
+        if progress_cb is not None:
+            progress_cb(f"ERROR loading validation records: {type(e).__name__}: {e}")
+        raise
+    
     problems: list[str] = []
     ground_truths: list[str] = []
     for ex in records:
@@ -551,14 +580,31 @@ def train(args: argparse.Namespace) -> None:
 
     _next_terminal_step(step_log, f"built {len(prompts)} supervised prompt/response pairs for training")
     train_ds = SFTStringDataset(prompts, responses)
+    
+    # Loading validation data - add timeout awareness
+    val_json_path = Path(args.val_json).expanduser().resolve()
     _next_terminal_step(
         step_log,
-        f"loading validation pairs from {Path(args.val_json).expanduser().resolve()}",
+        f"loading validation pairs from {val_json_path}",
     )
-    eval_problems, eval_ground_truths = load_val_eval_pairs(
-        Path(args.val_json).expanduser().resolve(),
-        progress_cb=_emit,
-    )
+    _emit(f"DEBUG: Validation file path: {val_json_path}")
+    _emit(f"DEBUG: Validation file exists: {val_json_path.exists()}")
+    if val_json_path.exists():
+        _emit(f"DEBUG: Validation file size: {val_json_path.stat().st_size / (1024*1024):.1f} MiB")
+    
+    try:
+        _emit("DEBUG: Starting validation data load...")
+        eval_problems, eval_ground_truths = load_val_eval_pairs(
+            val_json_path,
+            progress_cb=_emit,
+        )
+        _emit("DEBUG: Validation data load completed successfully")
+    except Exception as e:
+        _emit(f"ERROR: Failed to load validation data: {type(e).__name__}: {e}")
+        _emit("Stack trace:")
+        import traceback
+        _emit(traceback.format_exc())
+        raise
     _next_terminal_step(step_log, f"loaded {len(eval_problems)} validation problems with expected answers")
 
     # ==============================================
