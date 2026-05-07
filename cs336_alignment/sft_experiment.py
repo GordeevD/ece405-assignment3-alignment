@@ -458,6 +458,9 @@ def _wandb_init(args: argparse.Namespace, extra_config: dict[str, Any]) -> Any:
 
 
 def train(args: argparse.Namespace) -> None:
+    # ==============================================
+    # PHASE 1: INITIALIZATION & DEVICE SETUP
+    # ==============================================
     step_log: list[int] = [0]
     _next_terminal_step(step_log, "starting — policy device, seeds, optional HF_HOME")
     device = torch.device(args.policy_device)
@@ -470,6 +473,9 @@ def train(args: argparse.Namespace) -> None:
     else:
         _next_terminal_step(step_log, "HF_HOME unchanged (no --hf_home)")
 
+    # ==============================================
+    # PHASE 2: DATA LOADING
+    # ==============================================
     _next_terminal_step(step_log, f"reading prompt template: {args.prompt_template_path}")
     template = Path(args.prompt_template_path).read_text(encoding="utf-8")
     _next_terminal_step(step_log, f"loading SFT JSON: {args.sft_json}")
@@ -553,19 +559,9 @@ def train(args: argparse.Namespace) -> None:
     )
     _next_terminal_step(step_log, f"loaded {len(eval_problems)} validation problems with expected answers")
 
-    # W&B before model load so runs appear immediately and failures still create a partial run.
-    _next_terminal_step(step_log, "initializing Weights & Biases")
-    wandb_run = _wandb_init(
-        args,
-        {
-            "n_train_examples": len(train_ds),
-            "n_val_examples": len(eval_problems),
-            "val_json_resolved": str(Path(args.val_json).expanduser().resolve()),
-            "sft_json_resolved": str(Path(args.sft_json).expanduser().resolve()),
-        },
-    )
-    _next_terminal_step(step_log, "Weights & Biases run ready (see messages above for mode / URL)")
-
+    # ==============================================
+    # PHASE 3: MODEL & TOKENIZER LOADING
+    # ==============================================
     _next_terminal_step(
         step_log,
         f"loading tokenizer from {args.model_path} (first run may download; can take minutes)",
@@ -603,7 +599,11 @@ def train(args: argparse.Namespace) -> None:
     )
     _emit("-------------------------")
 
+    # ==============================================
+    # PHASE 4: OPTIONAL vLLM ENGINE INITIALIZATION
+    # ==============================================
     llm: LLM | None = None
+    # Initialize vLLM engine on separate GPU (or skip for single-GPU training)
     if not args.skip_vllm_eval:
         _next_terminal_step(
             step_log,
@@ -622,9 +622,29 @@ def train(args: argparse.Namespace) -> None:
     else:
         _next_terminal_step(step_log, "skipping vLLM (--skip_vllm_eval); validation during training disabled")
 
+    # ==============================================
+    # PHASE 5: WEIGHTS & BIASES INITIALIZATION
+    # Deferred until after all setup complete (tokenizer, model, optimizer, vLLM)
+    # This prevents timeout issues by connecting only when ready to train.
+    # ==============================================
+    _next_terminal_step(step_log, "initializing Weights & Biases")
+    wandb_run = _wandb_init(
+        args,
+        {
+            "n_train_examples": len(train_ds),
+            "n_val_examples": len(eval_problems),
+            "val_json_resolved": str(Path(args.val_json).expanduser().resolve()),
+            "sft_json_resolved": str(Path(args.sft_json).expanduser().resolve()),
+        },
+    )
+    _next_terminal_step(step_log, "Weights & Biases run ready (see messages above for mode / URL)")
+
     train_step = 0
     eval_step = 0
 
+    # ==============================================
+    # PHASE 6: OPTIONAL PRE-TRAINING VALIDATION
+    # ==============================================
     def run_eval(tag: str) -> float:
         nonlocal eval_step
         if llm is None:
@@ -666,11 +686,15 @@ def train(args: argparse.Namespace) -> None:
         model.train()
         return acc
 
+    # Run optional baseline validation before training starts
     if llm is not None and args.eval_at_start:
         run_eval("init")
     elif llm is not None:
         _next_terminal_step(step_log, "skipping pre-train eval (pass --eval_at_start for a baseline validation point)")
 
+    # ==============================================
+    # PHASE 7: MAIN TRAINING LOOP
+    # ==============================================
     n_microbatches = max(1, math.ceil(len(train_ds) / args.train_microbatch_size))
     use_tqdm_write_for_train = not args.no_progress_bar
 
@@ -685,6 +709,7 @@ def train(args: argparse.Namespace) -> None:
             and args.eval_every_train_steps != 1
         )
 
+    # Execute training epochs with gradient accumulation and periodic evaluation
     for epoch in range(args.epochs):
         _next_terminal_step(
             step_log,
@@ -817,10 +842,14 @@ def train(args: argparse.Namespace) -> None:
             if llm is not None and should_run_mid_train_eval(train_step):
                 run_eval(f"epoch{epoch}_step{train_step}_tail")
 
+    # ==============================================
+    # PHASE 8: POST-TRAINING EVALUATION & CLEANUP
+    # ==============================================
     _next_terminal_step(step_log, "all training epochs complete")
     final_acc = float("nan")
     final_n_eval: int | None = None
     final_n_correct: int | None = None
+    # Run final validation and collect metrics
     if llm is not None:
         final_acc = run_eval("final")
         final_n_eval = len(eval_problems)
@@ -828,6 +857,7 @@ def train(args: argparse.Namespace) -> None:
     else:
         _next_terminal_step(step_log, "skipping final eval (no vLLM)")
 
+    # Optionally save trained model and tokenizer
     if args.save_model_dir:
         out_dir = Path(args.save_model_dir)
         _next_terminal_step(step_log, f"saving policy and tokenizer to {out_dir}")
@@ -838,6 +868,9 @@ def train(args: argparse.Namespace) -> None:
     else:
         _next_terminal_step(step_log, "no --save_model_dir; skipping checkpoint write")
 
+    # ==============================================
+    # PHASE 9: RESULTS LOGGING & FINALIZATION
+    # ==============================================
     _next_terminal_step(step_log, "run finished — summary below")
     _emit("--- Run finished ---")
     if final_acc == final_acc:  # not NaN
@@ -867,11 +900,13 @@ def train(args: argparse.Namespace) -> None:
         "final_eval_n": final_n_eval,
         "final_eval_n_correct": final_n_correct,
     }
+    # Write final results to JSONL for aggregation
     results_path = Path(args.results_file)
     _write_final_result(results_path, final_result)
     _next_terminal_step(step_log, f"wrote final result to {results_path.expanduser().resolve()}")
     _next_terminal_step(step_log, "closing Weights & Biases run")
     wandb_run.finish()
+    _emit("==============================================\n")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1036,6 +1071,18 @@ def main() -> None:
         f"sft_experiment: parsed CLI (project={args.wandb_project!r}, run={args.wandb_run_name!r}) — "
         "entering train()",
     )
+    _emit("==============================================")
+    _emit("EXECUTION FLOW:")
+    _emit("  1. Initialization & Device Setup")
+    _emit("  2. Data Loading (SFT records, validation pairs)")
+    _emit("  3. Model & Tokenizer Loading")
+    _emit("  4. vLLM Engine Initialization (if not skipped)")
+    _emit("  5. Weights & Biases Initialization (deferred until setup complete)")
+    _emit("  6. Optional Pre-Training Validation")
+    _emit("  7. Main Training Loop (epochs with gradient accumulation)")
+    _emit("  8. Post-Training Evaluation & Cleanup")
+    _emit("  9. Results Logging & Finalization")
+    _emit("==============================================\n")
     train(args)
 
 
