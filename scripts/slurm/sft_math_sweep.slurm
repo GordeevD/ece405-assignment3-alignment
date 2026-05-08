@@ -1,21 +1,19 @@
 #!/bin/bash
-#SBATCH --partition=kill-shared
+#SBATCH --partition=gpu
 #SBATCH --job-name=sft-math-sweep
-# #SBATCH --nodes=1
-# #SBATCH --ntasks=1
-# #SBATCH --cpus-per-task=20
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=20
 #SBATCH --mem=64G
-#SBATCH --gres=gpu:nvidia_h200_nvl:2
+#SBATCH --gpus-per-node=2
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/slurm-%j.out
 #SBATCH --error=logs/slurm-%j.err
 # Optional site-specific directives (Slurm only reads lines that *start* with #SBATCH).
 # Uncomment by deleting the leading "# " so the line begins with #SBATCH:
-# #SBATCH --partition=gpu
 # #SBATCH --account=YOUR_ACCOUNT
 # #SBATCH --constraint=h100
 # #SBATCH --qos=normal
-# #SBATCH --gpus-per-node=2
 
 # SFT experiment uses two processes on one node: HF policy on cuda:0, vLLM on cuda:1
 # (see cs336_alignment/sft_experiment.py --policy_device / --vllm_device defaults).
