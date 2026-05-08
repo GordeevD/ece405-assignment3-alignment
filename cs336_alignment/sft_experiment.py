@@ -12,7 +12,7 @@ Example::
     HF_HOME="$(pwd)/.hf_cache" uv run python -m cs336_alignment.sft_experiment \\
         --wandb_project my-ece405-runs \\
         --wandb_run_name sft-qwen-math-01 \\
-        --model_path ../../Qwen/Qwen2.5-0.5B \\
+        --model_path ../Qwen/Qwen2.5-0.5B \\
         --sft_json cs336_alignment/sft_gpt-oss-120b_filtered.jsonl \\
         --max_train_examples 512 --epochs 1 --learning_rate 3e-5 \\
         --train_microbatch_size 1 --gradient_accumulation_steps 8
@@ -1040,7 +1040,7 @@ def train(args: argparse.Namespace) -> None:
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="SFT on MATH reasoning JSON with vLLM eval.")
     here = Path(__file__).resolve().parent
-    p.add_argument("--model_path", type=str, default="../../Qwen/Qwen2.5-0.5B")
+    p.add_argument("--model_path", type=str, default="../Qwen/Qwen2.5-0.5B")
     p.add_argument("--sft_json", type=str, default=str(here / "sft_gpt-oss-120b_filtered.jsonl"))
     p.add_argument(
         "--val_json",

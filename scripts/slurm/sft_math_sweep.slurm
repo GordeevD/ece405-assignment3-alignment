@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --partition=gpu
+#SBATCH --partition=kill-shared
 #SBATCH --job-name=sft-math-sweep
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=20
+#SBATCH --cpu=20
 #SBATCH --mem=64G
-#SBATCH --gpus-per-node=2
-#SBATCH --time=08:00:00
-#SBATCH --output=logs/slurm-%j.out
-#SBATCH --error=logs/slurm-%j.err
+#SBATCH --gres=gpu:nvidia_h200_nvl:2
+#SBATCH --time=02:00:00
+#SBATCH --output=slurm-%j.out
+#SBATCH --error=slurm-%j.err
 # Optional site-specific directives (Slurm only reads lines that *start* with #SBATCH).
 # Uncomment by deleting the leading "# " so the line begins with #SBATCH:
 # #SBATCH --account=YOUR_ACCOUNT
