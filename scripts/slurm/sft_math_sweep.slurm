@@ -3,7 +3,7 @@
 #SBATCH --job-name=sft-math-sweep
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpu=20
+# #SBATCH --cpu=20
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:nvidia_h200_nvl:2
 #SBATCH --time=02:00:00
