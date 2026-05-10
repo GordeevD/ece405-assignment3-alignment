@@ -98,7 +98,7 @@ def train(args: argparse.Namespace) -> None:
                 correct += 1
         return {"accuracy": correct / max(total, 1)}
 
-    print("Skipping full baseline evaluation on CPU; starting training.")
+    print(f"Using policy device: {device}. Starting GRPO training with {args.n_grpo_steps} steps.")
 
     global_step = 0
     for step in range(1, args.n_grpo_steps + 1):
