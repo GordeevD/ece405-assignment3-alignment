@@ -235,7 +235,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--gradient_accumulation_steps", type=int, default=128)
     p.add_argument("--loss_type", type=str, default="reinforce_with_baseline")
     p.add_argument("--use_std_normalization", action="store_true")
-    p.add_argument("--policy_device", type=str, default="cpu")
+    p.add_argument("--policy_device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--eval_interval", type=int, default=5)
     p.add_argument("--eval_batch_size", type=int, default=32)
