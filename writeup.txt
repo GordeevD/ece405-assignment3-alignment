@@ -305,3 +305,416 @@ cs336_alignment/sft_val.jsonl
 cs336_alignment/sft_experiment.py
 scripts/sft_math_sweep.sh
 
+
+
+
+5 Expert Iteration for MATH
+
+Problem (expert_iteration_experiment): Run expert iteration on the MATH dataset (2
+points) (6 H100 hrs).
+Run expert iteration on the MATH dataset (provided at cs336_alignment/train.jsonl)
+using the "../Qwen/Qwen2.5-0.5B" model, varying the number of rollouts G per question and the
+number of epochs used in the SFT step, and using n_ei_steps = 5. Vary the batch size for each
+expert iteration step (i.e., the size of Db) in {512, 1024, 2048}. (You do not need to try all possible
+combinations of these hyperparameters. Just enough to draw conclusions about each is fine.) Log the
+entropy of the model’s reponses over training. Make sure to have vLLM terminate generations at the
+second answer tag </answer>, as done in the SFT section.
+Deliverable: Validation accuracy curves associated with different rollout configurations. Try at
+least 2 different rollout counts and epoch counts.
+Deliverable: A model that achieves validation accuracy of at least 15% on MATH.
+Deliverable: A brief 2 sentence discussion comparing to your SFT performance, as well as perfor-
+mance across EI steps.
+Deliverable: A plot of the entropy of the model’s responses over training.
+
+
+Answer: cs336_alignment/expert_iteration_experiment.py
+
+
+7.2 Implementation GPRO
+
+Problem (compute_group_normalized_rewards): Group normalization (2 points)
+Deliverable: Implement a method compute_group_normalized_rewards that calculates raw
+rewards for each rollout response, normalizes them within their groups, and returns both the
+normalized and raw rewards along with any metadata you think is useful.
+The following interface is recommended:
+def compute_group_normalized_rewards(
+reward_fn,
+rollout_responses,
+repeated_ground_truths,
+group_size,
+advantage_eps,
+normalize_by_std,
+):
+Compute rewards for each group of rollout responses, normalized by the group size.
+Args:
+reward_fn: Callable[[str, str], dict[str, float]] Scores the rollout responses against
+the ground truths, producing a dict with keys "reward", "format_reward", and
+"answer_reward".
+rollout_responses: list[str] Rollouts from the policy. The length of this list is
+rollout_batch_size = n_prompts_per_rollout_batch * group_size.
+repeated_ground_truths: list[str] The ground truths for the examples. The length of this
+list is rollout_batch_size, because the ground truth for each example is repeated
+group_size times.
+group_size: int Number of responses per question (group).
+advantage_eps: float Small constant to avoid division by zero in normalization.
+normalize_by_std: bool If True, divide by the per-group standard deviation; otherwise
+subtract only the group mean.
+Returns:
+tuple[torch.Tensor, torch.Tensor, dict[str, float]].
+advantages shape (rollout_batch_size,). Group-normalized rewards for each rollout
+response.
+raw_rewards shape (rollout_batch_size,). Unnormalized rewards for each rollout
+response.
+metadata your choice of other statistics to log (e.g. mean, std, max/min of rewards).
+To test your code, implement [adapters.run_compute_group_normalized_rewards]. Then,
+run the test with uv run pytest -k test_compute_group_normalized_rewards and make
+sure your implementation passes it.
+
+Answer: 
+
+cs336_alignment/compute_group_normalized_rewards.py
+
+uv run pytest -k test_compute_group_normalized_rewards
+tests/test_grpo.py::test_compute_group_normalized_rewards_normalize_by_std PASSED                                                          [ 50%]
+tests/test_grpo.py::test_compute_group_normalized_rewards_no_normalize_by_std PASSED                                                       [100%]
+
+
+Naive policy gradient loss. 
+
+Problem (compute_naive_policy_gradient_loss): Naive policy gradient (1 point)
+Deliverable: Implement a method compute_naive_policy_gradient_loss that computes the
+per-token policy-gradient loss using raw rewards or pre-computed advantages.
+The following interface is recommended:
+def compute_naive_policy_gradient_loss(
+raw_rewards_or_advantages: torch.Tensor,
+policy_log_probs: torch.Tensor,
+) -> torch.Tensor:
+Compute the policy-gradient loss at every token, where raw_rewards_or_advantages is either
+the raw reward or an already-normalized advantage.
+Args:
+raw_rewards_or_advantages: torch.Tensor Shape (batch_size, 1), scalar
+reward/advantage for each rollout response.
+policy_log_probs: torch.Tensor Shape (batch_size, sequence_length), logprobs for
+each token.
+Returns:
+torch.Tensor Shape (batch_size, sequence_length), the per-token policy-gradient loss (to
+be aggregated across the batch and sequence dimensions in the training loop).
+Implementation tips:
+• Broadcast the raw_rewards_or_advantages over the sequence_length dimension.
+To test your code, implement [adapters.run_compute_naive_policy_gradient_loss]. Then
+run uv run pytest -k test_compute_naive_policy_gradient_loss and ensure the test
+passes.
+
+Answer:
+
+cs336_alignment/compute_naive_policy_gradient_loss.py
+uv run pytest -k test_compute_naive_policy_gradient_loss
+tests/test_grpo.py::test_compute_naive_policy_gradient_loss PASSED   
+
+
+GRPO-Clip loss
+
+Problem (compute_grpo_clip_loss): GRPO-Clip loss (2 points)
+Deliverable: Implement a method compute_grpo_clip_loss that computes the per-token
+GRPO-Clip loss.
+The following interface is recommended:
+def compute_grpo_clip_loss(
+advantages: torch.Tensor,
+policy_log_probs: torch.Tensor,
+old_log_probs: torch.Tensor,
+cliprange: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+Args:
+advantages: torch.Tensor Shape (batch_size, 1), per-example advantages A.
+policy_log_probs: torch.Tensor Shape (batch_size, sequence_length), per-token log
+probs from the policy being trained.
+old_log_probs: torch.Tensor Shape (batch_size, sequence_length), per-token log probs
+from the old policy.
+cliprange: float Clip parameter ε (e.g. 0.2).
+Returns:
+tuple[torch.Tensor, dict[str, torch.Tensor]].
+loss torch.Tensor of shape (batch_size, sequence_length), the per-token clipped
+loss.
+metadata dict containing whatever you want to log. We suggest logging whether each
+token was clipped or not, i.e., whether the clipped policy gradient loss on the RHS of
+the min was lower than the LHS.
+Implementation tips:
+• Broadcast advantages over sequence_length.
+To test your code, implement [adapters.run_compute_grpo_clip_loss]. Then run uv run
+pytest -k test_compute_grpo_clip_loss and ensure the test passes.
+
+Answer:
+
+cs336_alignment/compute_grpo_clip_loss.py
+uv run pytest -k test_compute_grpo_clip_loss
+tests/test_grpo.py::test_compute_grpo_clip_loss_large_cliprange PASSED                                                                     [ 50%]
+tests/test_grpo.py::test_compute_grpo_clip_loss_small_cliprange PASSED                                                                     [100%]
+
+
+Policy gradient loss wrapper.
+
+Problem (compute_policy_gradient_loss): Policy-gradient wrapper (1 point)
+Deliverable: Implement compute_policy_gradient_loss, a convenience wrapper that dispatches
+to the correct loss routine (no_baseline, reinforce_with_baseline, or grpo_clip) and returns
+both the per-token loss and any auxiliary statistics.
+The following interface is recommended:
+def compute_policy_gradient_loss(
+policy_log_probs: torch.Tensor,
+loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"],
+raw_rewards: torch.Tensor | None = None,
+advantages: torch.Tensor | None = None,
+old_log_probs: torch.Tensor | None = None,
+cliprange: float | None = None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+Select and compute the desired policy-gradient loss.
+Args:
+policy_log_probs (batch_size, sequence_length), per-token log-probabilities from the
+policy being trained.
+loss_type One of "no_baseline", "reinforce_with_baseline", or "grpo_clip".
+raw_rewards Required if loss_type == "no_baseline"; shape (batch_size, 1).
+advantages Required for "reinforce_with_baseline" and "grpo_clip"; shape
+(batch_size, 1).
+old_log_probs Required for "grpo_clip"; shape (batch_size, sequence_length).
+cliprange Required for "grpo_clip"; scalar ε used for clipping.
+Returns:
+tuple[torch.Tensor, dict[str, torch.Tensor]].
+loss (batch_size, sequence_length), per-token loss.
+metadata dict, statistics from the underlying routine (e.g., clip fraction for GRPO-Clip).
+Implementation tips:
+• Delegate to compute_naive_policy_gradient_loss or compute_grpo_clip_loss.
+• Perform argument checks (see assertion pattern above).
+• Aggregate any returned metadata into a single dict.
+To test your code, implement [adapters.run_compute_policy_gradient_loss]. Then run uv
+run pytest -k test_compute_policy_gradient_loss and verify it passes.
+
+Answer:
+
+cs336_alignment/compute_policy_gradient_loss.py
+uv run pytest -k test_compute_policy_gradient_loss
+tests/test_grpo.py::test_compute_policy_gradient_loss_no_baseline PASSED [ 33%]
+tests/test_grpo.py::test_compute_policy_gradient_loss_reinforce_with_baseline PASSED [ 66%]
+tests/test_grpo.py::test_compute_policy_gradient_loss_grpo_clip PASSED   [100%]
+
+
+Masked mean.
+
+Problem (masked_mean): Masked mean (1 point)
+Deliverable: Implement a method masked_mean that averages tensor elements while respecting a
+boolean mask.
+The following interface is recommended:
+def masked_mean(
+tensor: torch.Tensor,
+mask: torch.Tensor,
+dim: int | None = None,
+) -> torch.Tensor:
+Compute the mean of tensor along a given dimension, considering only those elements where
+mask == 1.
+Args:
+tensor: torch.Tensor The data to be averaged.
+mask: torch.Tensor Same shape as tensor; positions with 1 are included in the mean.
+dim: int | None Dimension over which to average. If None, compute the mean over all
+masked elements.
+Returns:
+torch.Tensor The masked mean; shape matches tensor.mean(dim) semantics.
+To test your code, implement [adapters.run_masked_mean]. Then run uv run pytest -k
+test_masked_mean and ensure it passes.
+
+Answer:
+
+cs336_alignment/masked_mean.py
+uv run pytest -k test_masked_mean
+tests/test_grpo.py::test_masked_mean_dim0 PASSED                                                                            [ 25%]
+tests/test_grpo.py::test_masked_mean_dim1 PASSED                                                                            [ 50%]
+tests/test_grpo.py::test_masked_mean_dimlast PASSED                                                                         [ 75%]
+tests/test_grpo.py::test_masked_mean_dimNone PASSED                                                                         [100%]
+
+
+GRPO microbatch train step. 
+
+Problem (grpo_microbatch_train_step): Microbatch train step (3 points)
+Deliverable: Implement a single micro-batch update for GRPO, including policy-gradient loss,
+averaging with a mask, and gradient scaling.
+The following interface is recommended:
+def grpo_microbatch_train_step(
+policy_log_probs: torch.Tensor,
+response_mask: torch.Tensor,
+gradient_accumulation_steps: int,
+loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"],
+raw_rewards: torch.Tensor | None = None,
+advantages: torch.Tensor | None = None,
+old_log_probs: torch.Tensor | None = None,
+cliprange: float | None = None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+Execute a forward-and-backward pass on a microbatch.
+Args:
+policy_log_probs (batch_size, sequence_length), per-token log-probabilities from the
+policy being trained.
+response_mask (batch_size, sequence_length), 1 for response tokens, 0 for
+prompt/padding.
+gradient_accumulation_steps Number of microbatches per optimizer step.
+loss_type One of "no_baseline", "reinforce_with_baseline", "grpo_clip".
+raw_rewards Needed when loss_type == "no_baseline"; shape (batch_size, 1).
+advantages Needed when loss_type != "no_baseline"; shape (batch_size, 1).
+old_log_probs Required for GRPO-Clip; shape (batch_size, sequence_length).
+cliprange Clip parameter ε for GRPO-Clip.
+Returns:
+tuple[torch.Tensor, dict[str, torch.Tensor]].
+loss scalar tensor. The microbatch loss, adjusted for gradient accumulation. We return
+this so we can log it.
+metadata Dict with metadata from the underlying loss call, and any other statistics you
+might want to log.
+Implementation tips:
+• You should call loss.backward() in this function. Make sure to adjust for gradient
+accumulation.
+To test your code, implement [adapters.run_grpo_microbatch_train_step]. Then run uv
+run pytest -k test_grpo_microbatch_train_step and confirm it passes.
+
+Answer:
+
+cs336_alignment/grpo_microbatch_train_step.py
+uv run pytest -k test_grpo_microbatch_train_step
+tests/test_grpo.py::test_grpo_microbatch_train_step_grpo_clip PASSED                                                        [ 50%]
+tests/test_grpo.py::test_grpo_microbatch_train_step_grpo_clip_10_steps PASSED                                               [100%]
+
+
+GRPO train loop. 
+
+Problem (grpo_train_loop): GRPO train loop (5 points)
+Deliverable: Implement a complete train loop for GRPO. Begin training a policy on MATH and
+confirm that you see validation rewards improving, along with sensible rollouts over time. Provide a
+plot with the validation rewards with respect to steps, and a few example rollouts over time.
+
+Answer:
+
+
+
+
+8 GRPO Experiments
+
+Problem (grpo_learning_rate): Tune the learning rate (2 points) (6 H100 hrs)
+Starting with the suggested hyperparameters above, perform a sweep over the learning rates and
+report the final validation answer rewards (or note divergence if the optimizer diverges).
+Deliverable: Validation reward curves associated with multiple learning rates.
+Deliverable: A model that achieves validation accuracy of at least 25% on MATH.
+Deliverable: A brief 2 sentence discussion on any other trends you notice on other logged metrics.
+
+Answer:
+
+
+
+Problem (grpo_baselines): Effect of baselining (2 points) (2 H100 hrs)
+Train a policy with reinforce_with_baseline and with no_baseline.
+Deliverable: Validation reward curves associated with each loss type.
+Deliverable: A brief 2 sentence discussion on any other trends you notice on other logged metrics.
+
+Answer:
+
+
+
+Length normalization.
+
+Problem (think_about_length_normalization): Think about length normalization (1
+point)
+Deliverable: Compare the two approaches (without running experiments yet). What are the pros
+and cons of each approach? Are there any specific settings or examples where one approach seems
+better?
+
+Answer:
+
+
+
+Problem (grpo_length_normalization): Effect of length normalization (2 points) (2 H100
+hrs)
+Deliverable: Compare normalization with masked_mean and masked_normalize with an end-to-
+end GRPO training run. Report the validation answer reward curves. Comment on the findings,
+including any other metrics that have a noticeable trend.
+Hint: consider metrics related to stability, such as the gradient norm.
+
+Answer:
+
+
+Normalization with group standard deviation.
+
+Problem (grpo_group_standard_deviation): Effect of standard deviation normalization (2
+points) (2 H100 hrs)
+Deliverable: Compare the performance of use_std_normalization == True and use_std_ ⌋
+normalization == False. Report the validation answer reward curves. Comment on the findings,
+including any other metrics that have a noticeable trend.
+Hint: consider metrics related to stability, such as the gradient norm.
+
+Answer:
+
+
+Off-policy versus on-policy. 
+
+Problem (grpo_off_policy): Implement off-policy GRPO
+Deliverable: Implement off-policy GRPO training.
+Depending on your implementation of the full GRPO train loop above, you may already have the
+infrastructure to do this. If not, you need to implement the following:
+• You should be able to take multiple epochs of gradient steps per rollout batch, where the number of
+epochs and optimizer updates per rollout batch are controlled by rollout_batch_size, epochs_ ⌋
+per_rollout_batch, and train_batch_size.
+• Edit your main training loop to get response logprobs from the policy after each rollout batch
+generation phase and before the inner loop of gradient steps—these will be the old_log_probs.
+We suggest using torch.inference_mode().
+• You should use the "GRPO-Clip" loss type.
+
+Answer:
+
+
+Problem (grpo_off_policy_sweep): Off-policy GRPO hyperparameter sweep (4 points)
+(12 H100 hrs)
+Deliverable: Fixing rollout_batch_size = 256, choose a range over epochs_per_rollout_ ⌋
+batch and train_batch_size to sweep over. First do a broad sweep for a limited number of GRPO
+steps (<50) to get a sense of the performance landscape, and then a more focused sweep for a larger
+number of GRPO steps (200). Provide a brief experiment log explaining the ranges you chose.
+Compare to your on-policy run with epochs_per_rollout_batch = 1 and train_batch_size =
+256, reporting plots with respect to number of validation steps as well as with respect to wall-clock
+time.
+Report the validation answer reward curves. Comment on the findings, including any other metrics
+that have a noticeable trend such as entropy and response length. Compare the entropy of the model’s
+responses over training to what you observed in the EI experiment.
+Hint: you will need to change gradient_accumulation_steps to keep memory usage constant.
+
+Answer:
+
+
+Ablating clipping in the off-policy setting.
+
+Problem (grpo_off_policy_clip_ablation): Off-policy GRPO-Clip ablation (2 points) (2
+H100 hrs)
+Deliverable: Implement the unclipped per-token loss as a new loss type "GRPO-No-Clip". Take
+your best performing off-policy hyperparameters from the previous problem and run the unclipped
+version of the loss. Report the validation answer reward curves. Comment on the findings compared
+to your GRPO-Clip run, including any other metrics that have a noticeable trend such as entropy,
+response length, and gradient norm.
+
+Answer:
+
+
+Effect of prompt.
+
+Problem (grpo_prompt_ablation): Prompt ablation (2 points) (2 H100 hrs)
+Deliverable: Report the validation answer reward curves for both the R1-Zero prompt and the
+question-only prompt. How do metrics compare, including any other metrics that have a noticeable
+trend such as entropy, response length, and gradient norm? Try to explain your findings.
+
+Answer:
+
+
+9 Leaderboard: GRPO on MATH
+
+Problem (leaderboard): Leaderboard (16 points) (16 H100 hrs)
+Deliverable: Report a validation accuracy obtained within 4 hours of training on 2 H100 GPUs
+and a screenshot of your validation accuracy with respect to wall-clock time, where the x-axis ends at
+≤4 hours. As a reminder, we place the following constraints on your evaluation:
+1. Your validation accuracy should be the average accuracy over the entire MATH validation set
+(all 5K examples).
+2. You must use the R1-Zero prompt at validation time.
+3. You must use temperature 1.0 and max tokens 1024 with vLLM for evaluation.
+4. You must calculate validation accuracy by averaging the answer rewards produced by the r1_ ⌋
+zero_reward_fn reward function provided in the starter code.
+
+Answer:
+
+
