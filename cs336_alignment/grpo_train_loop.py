@@ -26,7 +26,7 @@ def train(args: argparse.Namespace) -> None:
     """GRPO train loop with HF-only generation (no vLLM required)."""
     device = args.policy_device
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
-    model_kwargs = {"trust_remote_code": True}
+    model_kwargs = {"trust_remote_code": True, "attn_implementation": "eager"}
     if device.startswith("cuda"):
         model_kwargs["torch_dtype"] = torch.bfloat16
     policy = AutoModelForCausalLM.from_pretrained(args.model_path, **model_kwargs)
