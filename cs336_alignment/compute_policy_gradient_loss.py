@@ -7,7 +7,7 @@ import torch
 
 def compute_policy_gradient_loss(
 	policy_log_probs: torch.Tensor,
-	loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"],
+	loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip", "grpo_noclip"],
 	raw_rewards: torch.Tensor | None = None,
 	advantages: torch.Tensor | None = None,
 	old_log_probs: torch.Tensor | None = None,
@@ -40,5 +40,18 @@ def compute_policy_gradient_loss(
 			old_log_probs=old_log_probs,
 			cliprange=cliprange,
 		)
+
+	if loss_type == "grpo_noclip":
+		if advantages is None:
+			raise ValueError("advantages is required when loss_type='grpo_noclip'")
+		if old_log_probs is None:
+			raise ValueError("old_log_probs is required when loss_type='grpo_noclip'")
+		ratios = torch.exp(policy_log_probs - old_log_probs.to(policy_log_probs.device))
+		if advantages.ndim == 1:
+			advantages = advantages.unsqueeze(1).to(policy_log_probs.dtype).to(policy_log_probs.device)
+		else:
+			advantages = advantages.to(policy_log_probs.dtype).to(policy_log_probs.device)
+		loss = - (ratios * advantages.expand_as(policy_log_probs))
+		return loss, {"ratio": ratios}
 
 	raise ValueError(f"Unsupported loss_type: {loss_type}")

@@ -22,7 +22,7 @@ def run_baselines():
         parser = build_arg_parser()
         # Parse default arguments
         args = parser.parse_args([])
-    wandb.init(project=getattr(args, 'wandb_project', 'cs336-alignment'), name=getattr(args, 'wandb_run_name', None), config=vars(args))
+        wandb.init(project=getattr(args, 'wandb_project', 'cs336-alignment'), name=getattr(args, 'wandb_run_name', None), config=vars(args))
         
         # Override specific arguments
         args.loss_type = loss_type
