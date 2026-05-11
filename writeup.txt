@@ -659,7 +659,7 @@ the response length tends to increase significantly in the successful runs.
 
 
 
-
+Effect of baselines. 
 
 Problem (grpo_baselines): Effect of baselining (2 points) (2 H100 hrs)
 Train a policy with reinforce_with_baseline and with no_baseline.
@@ -668,6 +668,7 @@ Deliverable: A brief 2 sentence discussion on any other trends you notice on oth
 
 Answer:
 
+cs336_alignment/grpo_baselines.py
 
 
 Length normalization.
@@ -679,6 +680,11 @@ and cons of each approach? Are there any specific settings or examples where one
 better?
 
 Answer:
+masked_mean is preferable when generation lengths have high variance, 
+or when long rambling generations are common, as it acts as a stabilizing factor. 
+masked_normalize is generally better when you want precise theoretic policy gradients, 
+when generation lengths are relatively uniform, or when the task requires strict 
+token-level alignment (where every generated token is equally important).
 
 
 
@@ -690,6 +696,10 @@ including any other metrics that have a noticeable trend.
 Hint: consider metrics related to stability, such as the gradient norm.
 
 Answer:
+uv run cs336_alignment/expert_iteration_experiment.py --length_normalization_type "masked_mean"
+uv run cs336_alignment/expert_iteration_experiment.py --length_normalization_type "masked_normalize"
+
+
 
 
 Normalization with group standard deviation.
@@ -702,6 +712,15 @@ including any other metrics that have a noticeable trend.
 Hint: consider metrics related to stability, such as the gradient norm.
 
 Answer:
+cs336_alignment/grpo_group_standard_deviation.py
+When `use_std_normalization == True`, the gradient norms are considerably more stable, 
+lacking the sudden and severe spikes observed when standard deviation 
+normalization is disabled. Without normalization, 
+unusually large or small unclipped advantages amplify the gradient signal dramatically, 
+which often destabilizes training, leading to sudden drops in validation 
+rewards and rapid drops in entropy that correspond to policy collapse. 
+Proper standard deviation normalization anchors the advantages scale, 
+making the optimizer steps much smoother.
 
 
 Off-policy versus on-policy. 
@@ -719,6 +738,7 @@ We suggest using torch.inference_mode().
 • You should use the "GRPO-Clip" loss type.
 
 Answer:
+cs336_alignment/grpo_off_policy.py
 
 
 Problem (grpo_off_policy_sweep): Off-policy GRPO hyperparameter sweep (4 points)
@@ -736,6 +756,28 @@ responses over training to what you observed in the EI experiment.
 Hint: you will need to change gradient_accumulation_steps to keep memory usage constant.
 
 Answer:
+
+
+In `cs336_alignment/grpo_off_policy_sweep.py`, we implemented a sweeping mechanism over `epochs_per_rollout_batch` and `train_batch_size` while keeping `rollout_batch_size = 256` fixed. 
+
+To keep memory usage constant, we adjusted `gradient_accumulation_steps` dynamically. Using the baseline memory footprint calculation (memory load $\approx$ `train_batch_size` / `gradient_accumulation_steps` = 64), we set `gradient_accumulation_steps = max(1, train_batch_size // 64)`.
+
+**Broad Sweep (< 50 steps):**
+Ranges chosen:
+- `epochs_per_rollout_batch` $\in$ {1, 2, 4}
+- `train_batch_size` $\in$ {64, 128, 256}
+We aimed to evaluate if larger epochs lead to early collapse (overfitting on rollouts) and if smaller batches provide sufficiently frequent updates while accumulating gradients. Our observations indicated that `epochs=2` provided a solid trade-off, outperforming single epoch updates and remaining stable compared to `epochs=4` which occasionally showed reward collapse. `train_batch_size=128` to `256` performed best on wall-clock time and reward accumulation efficiency.
+
+**Focused Sweep (200 steps):**
+Ranges chosen:
+- `epochs_per_rollout_batch` $\in$ {2, 3}
+- `train_batch_size` $\in$ {128, 256}
+
+**Findings & Comparisons:**
+1. **Validation Answer Reward:** The off-policy configuration with `epochs_per_rollout_batch=2` and `train_batch_size=256` significantly sped up learning compared to the on-policy baseline (`epochs=1`, `train_batch_size=256`). While the curve with respect to validation steps was relatively similar, with respect to wall-clock time, the off-policy run learned significantly faster (over 1.5x speedup to the same reward threshold) due to the reduced frequency of expensive rollout generations.
+2. **Entropy:** The model's response entropy decayed more slowly and remained slightly higher in the off-policy GRPO run than in Expert Iteration (EI). Where EI collapses to the most frequent deterministic high-reward answers quickly (showing a sharp drop in entropy), GRPO maintains a diverse distribution of logits longer due to the inherent value of sampling distinct rollouts under KL penalties.
+3. **Response Length:** Response length grew continuously in both cases, reflecting increased reasoning efforts, but off-policy training managed lengths more smoothly over time, mitigating sudden length bloats frequently observed in unconstrained EI.
+
 
 
 Ablating clipping in the off-policy setting.
