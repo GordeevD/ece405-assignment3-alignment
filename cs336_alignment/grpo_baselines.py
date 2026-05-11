@@ -1,4 +1,5 @@
 import argparse
+import wandb
 import os
 import gc
 import torch
@@ -12,11 +13,16 @@ def run_baselines():
     for loss_type in loss_types:
         print(f"\n" + "="*50)
         print(f"Starting GRPO training with loss_type: {loss_type}")
+        try:
+            wandb.log({"train/loss": loss.item() if hasattr(loss, "item") else getattr(args, "loss", 0), "step": step})
+        except Exception:
+            pass
         print(f"="*50)
         
         parser = build_arg_parser()
         # Parse default arguments
         args = parser.parse_args([])
+    wandb.init(project=getattr(args, 'wandb_project', 'cs336-alignment'), name=getattr(args, 'wandb_run_name', None), config=vars(args))
         
         # Override specific arguments
         args.loss_type = loss_type

@@ -1,5 +1,6 @@
 import json
 import argparse
+import wandb
 from typing import Callable, List, Dict, Any
 import pandas as pd
 from vllm import LLM, SamplingParams
@@ -54,6 +55,7 @@ def evaluate_vllm(
     print(f"Average Reward: {avg_reward:.4f}")
     print(f"Average Format Reward: {avg_format_reward:.4f}")
     print(f"Average Answer Reward: {avg_answer_reward:.4f}")
+    wandb.log({"eval/avg_reward": avg_reward, "eval/avg_format_reward": avg_format_reward, "eval/avg_answer_reward": avg_answer_reward, "eval/accuracy": avg_answer_reward})
 
     # Category counts
     # (1) correct with both format and answer reward 1
@@ -73,8 +75,11 @@ def evaluate_vllm(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, default="../../Qwen/Qwen2.5-0.5B/")
+    parser.add_argument('--wandb_project', type=str, default='cs336-alignment', help='W&B project name')
+    parser.add_argument('--wandb_run_name', type=str, default=None, help='W&B run name')
     parser.add_argument("--output_path", type=str, default="zeroshot_qwen_math_eval.jsonl")
     args = parser.parse_args()
+    wandb.init(project=getattr(args, 'wandb_project', 'cs336-alignment'), name=getattr(args, 'wandb_run_name', None), config=vars(args))
     
     # 1) load the MATH validation examples
     print("Loading data...")

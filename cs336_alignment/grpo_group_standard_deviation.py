@@ -1,3 +1,4 @@
+import wandb
 import subprocess
 import os
 
